@@ -1,0 +1,9 @@
+/target
+pkg/omaspace-driver/*.pkg.tar.zst
+pkg/omaspace-driver/pkg/
+pkg/omaspace-driver/src/
+pkg/omaspace-driver/cua/
+pkg/omaspace-driver/plugin/
+/e2e/node_modules/
+/e2e/report/
+/e2e/test-results/

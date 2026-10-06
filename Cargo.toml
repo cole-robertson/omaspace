@@ -1,0 +1,37 @@
+[package]
+name = "omaspace"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Move Omarchy workspaces between your own machines over Tailscale"
+repository = "https://github.com/cole-robertson/omaspace"
+readme = "README.md"
+keywords = ["omarchy", "hyprland", "tailscale", "wayland", "remote-desktop"]
+categories = ["command-line-utilities"]
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+tiny_http = "0.12"
+rusqlite = { version = "0.40", features = ["bundled"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+zeroize = "1"
+tempfile = "3"
+rusty-leveldb = "4"
+tungstenite = "0.29"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+
+
+[profile.release]
+strip = true
+lto = "thin"

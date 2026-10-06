@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# omarchy:summary=Give, take back or watch an Omarchy workspace on one of your machines (omaspace)
+# omarchy:args=[spaces|menu|send|pull|stash|watch|send-file|sync-folder|give-window] [peer] [workspace|address]
+# omarchy:examples=omarchy-omaspace|omarchy-omaspace send|omarchy-omaspace pull alpha 3|omarchy-omaspace watch alpha
+
+set -uo pipefail
+
+action=${1:-spaces}
+peer=${2:-}
+workspace=${3:-}
+
+# The Spaces panel (omaspace.spaces shell plugin); the plain menu if the
+# plugin isn't installed.
+if [[ $action == spaces ]]; then
+  [[ $(omarchy-shell shell summon omaspace.spaces '{"mode":"keyboard"}' 2>/dev/null) == ok ]] && exit 0
+  action=menu
+fi
+
+# Dropped on the Spaces panel: give one window, onto a workspace there.
+if [[ $action == give-window ]]; then
+  address=${3:-}
+  target=${4:-}
+  [[ -n $peer && $address == 0x* ]] || { echo "Usage: omarchy-omaspace give-window <peer> <address> [workspace]" >&2; exit 1; }
+  title=$(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | .title')
+  args=(--window "$address" --with-files)
+  [[ -n $target ]] && args+=(--to-workspace "$target")
+  notify-send "omaspace" "Giving ${title:-the window} to $peer…"
+  if output=$(omaspace send "$peer" "${args[@]}" 2>&1); then
+    notify-send "omaspace" "$(tail -1 <<<"$output")"
+  else
+    notify-send -u critical "omaspace" "$(tail -3 <<<"$output")"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ $action == menu ]]; then
+  choice=$(omarchy-menu-select "Workspace" \
+    $'\uf1d8\tGive this workspace\tsend it, with its project folders' \
+    $'\uf019\tTake a workspace back\tpull it, with its project folders' \
+    $'\uf06e\tWatch another machine\tlive view, take over with your mouse' \
+    $'\uf15b\tSend files to…\tto that machine\'s Downloads' \
+    $'\uf021\tSync a folder with…\tkeep a folder the same on both') || exit 0
+  case $choice in
+  Give*) action=send ;;
+  Take*) action=pull ;;
+  Watch*) action=watch ;;
+  Send\ files*) action=send-file ;;
+  Sync*) action=sync-folder ;;
+  *) exit 0 ;;
+  esac
+fi
+
+# Watching opens omaspace's live view of that machine (omaspace view behind
+# tailscale serve :7788 there).
+if [[ $action == watch ]]; then
+  [[ -n $peer ]] || peer=$(omaspace peers | awk '$2 == "desktop" { print $1 }' | omarchy-menu-select "Watch") || exit 0
+  domain=$(tailscale status --json | jq -r .MagicDNSSuffix)
+  url="https://$peer.$domain:7788/?name=$(hostname)"
+  [[ -n $workspace ]] && url+="&workspace=$workspace"
+  exec omarchy-launch-webapp "$url"
+fi
+pick_peer() {
+  [[ -n $peer ]] && return
+  mapfile -t all < <(omaspace peers | awk '{ print $1 }')
+  ((${#all[@]})) || { notify-send -u critical "omaspace" "No other machines running omaspace on your tailnet"; exit 1; }
+  if ((${#all[@]} == 1)); then peer=${all[0]}; else peer=$(omarchy-menu-select "$1" "${all[@]}") || exit 0; fi
+}
+
+if [[ $action == send-file ]]; then
+  mapfile -t picked < <(omarchy-file-select --title "Send files" --multiple) || exit 0
+  ((${#picked[@]})) || exit 0
+  pick_peer "Send ${#picked[@]} file(s) to"
+  notify-send "omaspace" "Sending ${#picked[@]} file(s) to $peer…"
+  if output=$(omaspace put "$peer" "${picked[@]}" 2>/dev/null); then
+    notify-send "omaspace" "$(tail -1 <<<"$output") (~/Downloads)"
+  else
+    notify-send -u critical "omaspace" "Sending to $peer failed: $(tail -2 <<<"$output")"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ $action == sync-folder ]]; then
+  folder=$(omarchy-file-select --title "Folder to keep in sync" --directory) || exit 0
+  [[ -n $folder ]] || exit 0
+  pick_peer "Sync $(basename "$folder") with"
+  # A user service per folder, so the sync keeps running in the background.
+  unit="omaspace-sync-$(printf '%s' "$peer:$folder" | sha256sum | cut -c1-10)"
+  systemd-run --user --unit="$unit" --description="omaspace sync $folder <-> $peer" \
+    "$(command -v omaspace)" sync "$peer" "$folder" >/dev/null 2>&1 ||
+    systemctl --user restart "$unit"
+  notify-send "omaspace" "Syncing $(basename "$folder") with $peer (stop: systemctl --user stop $unit)"
+  exit 0
+fi
+
+[[ -n $workspace ]] || workspace=$(hyprctl activeworkspace -j | jq -r .id)
+
+if [[ -z $peer ]]; then
+  mapfile -t peers < <(omaspace peers | awk -v a="$action" 'a == "stash" || $2 == "desktop" { print $1 }')
+  case ${#peers[@]} in
+  0)
+    notify-send -u critical "omaspace" "No other machines running omaspace on your tailnet"
+    exit 1
+    ;;
+  1) peer=${peers[0]} ;;
+  *) peer=$(omarchy-menu-select "${action^} workspace $workspace" "${peers[@]}") || exit 0 ;;
+  esac
+fi
+[[ -n $peer ]] || exit 0
+
+case $action in
+send) message="Sending workspace $workspace to $peer" ;;
+pull) message="Pulling workspace $workspace from $peer" ;;
+stash) message="Keeping workspace $workspace on $peer" ;;
+*)
+  echo "Usage: omarchy-omaspace <send|pull|stash> [peer]" >&2
+  exit 1
+  ;;
+esac
+
+notify-send "omaspace" "$message…"
+files=()
+[[ $action == send || $action == pull ]] && files=(--with-files)
+
+# Like cua Spaces: tabs, site data, bookmarks and preferences travel by
+# default; sign-ins (cookies) are withheld unless you allow them, here or
+# ahead of time in ~/.config/omaspace/policy.json.
+sensitive=()
+if [[ $action == send || $action == pull ]] && ! grep -q '"cookies"' "${XDG_CONFIG_HOME:-$HOME/.config}/omaspace/policy.json" 2>/dev/null; then
+  choice=$(omarchy-menu-select "Bring sign-ins too?" \
+    $'\uf023\tNo, tabs and site data only\tsign-ins stay here (default)' \
+    $'\uf2bd\tYes, bring sign-ins\tcookies for the sites open in this workspace') || exit 0
+  [[ $choice == Yes* ]] && sensitive=(--allow-sensitive cookies)
+fi
+if output=$(omaspace "$action" "$peer" --workspace "$workspace" "${files[@]}" "${sensitive[@]}" 2>&1); then
+  notify-send "omaspace" "$(tail -1 <<<"$output")"
+else
+  notify-send -u critical "omaspace" "$(tail -3 <<<"$output")"
+  exit 1
+fi

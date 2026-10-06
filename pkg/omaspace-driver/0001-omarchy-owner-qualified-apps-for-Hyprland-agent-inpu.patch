@@ -1,0 +1,148 @@
+From 4e075190b9358c6acceaf9506ac6a7f88ba83a52 Mon Sep 17 00:00:00 2001
+From: omaspace <omaspace@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 18:20:39 -0500
+Subject: [PATCH 1/3] omarchy: owner-qualified apps for Hyprland agent input
+
+Read ~/.config/cua-driver/qualified-apps (<package> <version|*> <exe>)
+and admit those executables exactly like the built-in Inkscape and
+LibreOffice entries: live /proc exe must match, owned by that installed
+pacman package. Unlisted apps stay client_not_qualified.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../src/wayland/hyprland_compatibility.rs     | 98 +++++++++++++++++--
+ 1 file changed, 88 insertions(+), 10 deletions(-)
+
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_compatibility.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_compatibility.rs
+index 5d14aeb..2c3d210 100644
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_compatibility.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_compatibility.rs
+@@ -5,13 +5,13 @@
+ use std::io::Read;
+ use std::path::{Path, PathBuf};
+ 
+-struct QualifiedPackage {
+-    name: &'static str,
+-    version: &'static str,
+-    executable: &'static str,
++struct QualifiedPackage<'a> {
++    name: &'a str,
++    version: &'a str,
++    executable: &'a str,
+ }
+ 
+-const PACKAGES: &[QualifiedPackage] = &[
++const PACKAGES: &[QualifiedPackage<'static>] = &[
+     QualifiedPackage {
+         name: "libreoffice-fresh",
+         version: "26.2.5-3",
+@@ -46,16 +46,76 @@ fn read_bounded(path: &Path) -> Result<String, &'static str> {
+     Ok(content)
+ }
+ 
++/// Omarchy: apps the desktop's owner has qualified for agent input, one per
++/// line as `<package> <version> <executable>`, in
++/// `$XDG_CONFIG_HOME/cua-driver/qualified-apps`. `#` starts a comment. A
++/// version of `*` admits whatever version pacman has installed. Entries are
++/// checked exactly like the built-in ones: the live executable must be that
++/// path, owned by that installed package. A missing file adds nothing.
++fn user_packages() -> Vec<(String, String, String)> {
++    let base = std::env::var_os("XDG_CONFIG_HOME")
++        .map(PathBuf::from)
++        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
++    let Some(path) = base.map(|base| base.join("cua-driver").join("qualified-apps")) else {
++        return Vec::new();
++    };
++    let Ok(content) = read_bounded(&path) else {
++        return Vec::new();
++    };
++    parse_user_packages(&content)
++}
++
++fn parse_user_packages(content: &str) -> Vec<(String, String, String)> {
++    content
++        .lines()
++        .map(|line| line.split('#').next().unwrap_or("").trim())
++        .filter_map(|line| {
++            let mut fields = line.split_whitespace();
++            let (name, version, executable) = (fields.next()?, fields.next()?, fields.next()?);
++            (fields.next().is_none() && executable.starts_with('/'))
++                .then(|| (name.to_string(), version.to_string(), executable.to_string()))
++        })
++        .collect()
++}
++
++/// The installed version of `name`, read from pacman's local database.
++fn installed_version(name: &str) -> Option<String> {
++    let prefix = format!("{name}-");
++    std::fs::read_dir("/var/lib/pacman/local")
++        .ok()?
++        .flatten()
++        .filter_map(|entry| entry.file_name().into_string().ok())
++        .filter_map(|dir| dir.strip_prefix(&prefix).map(str::to_string))
++        // `<version>-<pkgrel>` has exactly one '-' left; a longer package
++        // name sharing this prefix (`foot-terminfo`) has more.
++        .find(|rest| rest.matches('-').count() == 1)
++}
++
+ pub(super) fn qualify(pid: u32) -> Result<(), &'static str> {
+     let process_exe = PathBuf::from(format!("/proc/{pid}/exe"));
+     let executable =
+         std::fs::read_link(&process_exe).map_err(|_| "client_qualification_unavailable")?;
+-    let package = PACKAGES
+-        .iter()
+-        .find(|package| {
+-            std::fs::canonicalize(package.executable).ok().as_ref() == Some(&executable)
+-        })
++    let built_in = PACKAGES.iter().map(|package| {
++        (
++            package.name.to_string(),
++            package.version.to_string(),
++            package.executable.to_string(),
++        )
++    });
++    let (name, version, package_executable) = built_in
++        .chain(user_packages())
++        .find(|(_, _, path)| std::fs::canonicalize(path).ok().as_ref() == Some(&executable))
+         .ok_or("client_not_qualified")?;
++    let version = if version == "*" {
++        installed_version(&name).ok_or("client_not_qualified")?
++    } else {
++        version
++    };
++    let package = QualifiedPackage {
++        name: &name,
++        version: &version,
++        executable: &package_executable,
++    };
+     let directory = PathBuf::from("/var/lib/pacman/local")
+         .join(format!("{}-{}", package.name, package.version));
+     let description = read_bounded(&directory.join("desc"))?;
+@@ -93,6 +153,24 @@ mod tests {
+         assert_eq!(field("prefix%NAME%\ninkscape", "%NAME%"), None);
+     }
+ 
++    #[test]
++    fn user_list_takes_exact_three_field_lines_with_absolute_paths() {
++        let content = "# owner-qualified\nfoot * /usr/bin/foot\n\nchromium 152.0-1 /usr/lib/chromium/chromium  # browser\nrelative 1-1 bin/x\ntoo many 1-1 /usr/bin/y extra\nshort 1-1\n";
++        assert_eq!(
++            parse_user_packages(content),
++            vec![
++                ("foot".into(), "*".into(), "/usr/bin/foot".into()),
++                ("chromium".into(), "152.0-1".into(), "/usr/lib/chromium/chromium".into()),
++            ]
++        );
++    }
++
++    #[test]
++    fn unlisted_process_stays_refused() {
++        // This test binary is in no list, built-in or user.
++        assert_eq!(qualify(std::process::id()), Err("client_not_qualified"));
++    }
++
+     #[test]
+     fn nonexistent_process_cannot_be_qualified() {
+         assert!(qualify(u32::MAX).is_err());
+-- 
+2.55.0
+

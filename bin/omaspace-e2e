@@ -1,0 +1,22 @@
+#!/bin/bash
+# Run omaspace's end-to-end suite against real Omarchy machines.
+#
+#   OMASPACE_E2E_DESK=mydesk bin/omaspace-e2e              all tests on one machine
+#   OMASPACE_E2E_DESK=mydesk OMASPACE_E2E_PEER=mylaptop bin/omaspace-e2e
+#                                                           plus the two-machine tests
+#   bin/omaspace-e2e spaces                                 one spec file (spaces, view, files, ...)
+#   bin/omaspace-e2e -g "drag"                              Playwright's own flags pass through
+#
+# Machines are tailnet hostnames; one may be this machine, the others are
+# reached over SSH. See e2e/README.md for what each machine needs.
+# The HTML report (with screenshots and traces of failures) is left in
+# e2e/report/; open it with `npx playwright show-report e2e/report`.
+set -euo pipefail
+cd "$(dirname "$0")/../e2e"
+: "${OMASPACE_E2E_DESK:?set OMASPACE_E2E_DESK to the tailnet hostname of the Omarchy machine to test (see e2e/README.md)}"
+[[ -d node_modules ]] || npm ci --silent
+args=()
+for a in "$@"; do
+  if [[ -f tests/$a.spec.js ]]; then args+=("tests/$a.spec.js"); else args+=("$a"); fi
+done
+exec npx playwright test "${args[@]}"

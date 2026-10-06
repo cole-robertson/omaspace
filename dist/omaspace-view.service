@@ -1,0 +1,12 @@
+[Unit]
+Description=omaspace view (Omarchy live view, tailnet HTTPS via tailscale serve)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/omaspace view
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

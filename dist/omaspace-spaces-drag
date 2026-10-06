@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# omarchy:summary=Drag a window to the top edge to give it to another machine (omaspace Spaces panel)
+# omarchy:args=<start|end>
+#
+# Bound to SUPER + mouse:272 press (start) and release (end), non-consuming,
+# so Omarchy's own SUPER-drag still moves the window. While the button is
+# held, polls the cursor every 60 ms; in the top 24 px of a monitor it opens
+# the Spaces panel there and tells it where the pointer is. On release over
+# the panel the window is dropped on whatever is under the pointer.
+
+set -uo pipefail
+
+state="${XDG_RUNTIME_DIR:-/tmp}/omaspace-spaces-drag"
+edge=24
+
+stop_watch() {
+  [[ -f $state.pid ]] && kill "$(cat "$state.pid")" 2>/dev/null
+  rm -f "$state.pid"
+}
+
+# The monitor under (x, y) as "name x y" in logical pixels.
+monitor_at() {
+  hyprctl -j monitors | jq -r --argjson x "$1" --argjson y "$2" '
+    .[] | select($x >= .x and $y >= .y and $x < .x + (.width / .scale) and $y < .y + (.height / .scale))
+    | "\(.name) \(.x) \(.y)"' | head -1
+}
+
+call() { omarchy-shell -q shell call omaspace.spaces "$@" 2>/dev/null; }
+
+case ${1:-} in
+start)
+  stop_watch
+  rm -f "$state.open"
+  read -r cx cy < <(hyprctl -j cursorpos | jq -r '"\(.x) \(.y)"')
+  # The window being dragged is the one under the pointer when SUPER+click lands.
+  visible=$(hyprctl -j monitors | jq -c '[.[].activeWorkspace.id]')
+  address=$(hyprctl -j clients | jq -r --argjson x "$cx" --argjson y "$cy" --argjson vis "$visible" '
+    [.[] | select(.mapped and (.workspace.id as $w | $vis | index($w)))
+         | select($x >= .at[0] and $y >= .at[1] and $x < .at[0] + .size[0] and $y < .at[1] + .size[1])]
+    | sort_by(.focusHistoryID) | .[0].address // empty')
+  [[ -n $address ]] || exit 0
+  printf '%s\n' "$address" >"$state.address"
+  call prefetch "" >/dev/null
+  (
+    while sleep 0.06; do
+      read -r x y < <(hyprctl -j cursorpos | jq -r '"\(.x) \(.y)"')
+      read -r name mx my < <(monitor_at "$x" "$y")
+      [[ -n ${name:-} ]] || continue
+      lx=$((x - mx)) ly=$((y - my))
+      if [[ ! -f $state.open ]]; then
+        ((ly < edge)) || continue
+        title=$(hyprctl -j clients | jq -r --arg a "$address" '.[] | select(.address == $a) | .title')
+        payload=$(jq -cn --arg a "$address" --arg t "$title" --arg m "$name" '{mode: "drag", address: $a, title: $t, monitor: $m}')
+        omarchy-shell -q shell summon omaspace.spaces "$payload" >/dev/null 2>&1
+        printf '%s\n' "$name $mx $my" >"$state.open"
+      fi
+      call hover "$lx $ly" >/dev/null
+    done
+  ) &
+  echo $! >"$state.pid"
+  ;;
+end)
+  stop_watch
+  if [[ -f $state.open ]]; then
+    read -r _ mx my <"$state.open"
+    read -r x y < <(hyprctl -j cursorpos | jq -r '"\(.x) \(.y)"')
+    call drop "$((x - mx)) $((y - my))" >/dev/null
+  fi
+  rm -f "$state.open" "$state.address"
+  ;;
+*)
+  echo "Usage: omaspace-spaces-drag <start|end>" >&2
+  exit 1
+  ;;
+esac

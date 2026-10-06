@@ -1,0 +1,54 @@
+# omaspace-driver: cua-driver (MIT) + cua's Hyprland input plugin (MIT), with
+# the Omarchy patches omaspace needs, so agents can use desktop apps on their
+# own workspace without your focus or pointer. Built from trycua/cua at the
+# commit below with the patches in this directory. Linux x86_64; the plugin is
+# built against the installed Hyprland, so rebuild after a Hyprland upgrade.
+#
+#   cd pkg/omaspace-driver && makepkg -si
+pkgname=omaspace-driver
+pkgver=0.32.0
+pkgrel=1
+pkgdesc="cua-driver and Hyprland agent input for omaspace (Omarchy patches)"
+arch=(x86_64)
+url="https://github.com/trycua/cua"
+license=('MIT')
+depends=(hyprland at-spi2-core libxkbcommon)
+makedepends=(git cargo cmake ninja)
+options=('!strip' '!debug' '!lto')
+_commit=0f1955d2f1ee2b01b40775aa53ea2af0b5544218 # cua-spaces 0.3.1 (cua-driver 0.32.0)
+source=("cua::git+https://github.com/trycua/cua.git#commit=$_commit"
+        0001-omarchy-owner-qualified-apps-for-Hyprland-agent-inpu.patch
+        0003-omarchy-keep-foreground-typing-under-Omarchy-key-rem.patch
+        cua.lua
+        qualified-apps.example
+        cua-driver.service)
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+prepare() {
+  cd cua
+  for p in "$srcdir"/0*.patch; do
+    git apply -p1 "$p"
+  done
+}
+
+build() {
+  cd cua/libs/cua-driver
+  (cd rust && cargo build --release --locked -p cua-driver)
+  cmake -S hyprland-plugin -B "$srcdir/plugin" -G Ninja -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$srcdir/plugin"
+}
+
+package() {
+  install -Dm755 cua/libs/cua-driver/rust/target/release/cua-driver "$pkgdir/usr/lib/omaspace-driver/cua-driver"
+  install -Dm755 plugin/cua-hyprland-plugin.so "$pkgdir/usr/lib/omaspace-driver/cua-hyprland-plugin.so"
+  install -Dm644 cua.lua "$pkgdir/usr/share/omaspace-driver/cua.lua"
+  install -Dm644 qualified-apps.example "$pkgdir/usr/share/omaspace-driver/qualified-apps.example"
+  install -Dm644 cua-driver.service "$pkgdir/usr/lib/systemd/user/omaspace-cua-driver.service"
+  install -Dm644 0*.patch -t "$pkgdir/usr/share/omaspace-driver/patches/"
+  install -Dm644 cua/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

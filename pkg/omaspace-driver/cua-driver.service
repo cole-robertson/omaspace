@@ -1,0 +1,14 @@
+[Unit]
+Description=cua-driver for omaspace agents (desktop apps on agent workspaces)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/lib/omaspace-driver/cua-driver serve
+Environment=CUA_DRIVER_RS_ENABLE_WAYLAND=1
+Environment=CUA_TELEMETRY=0
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

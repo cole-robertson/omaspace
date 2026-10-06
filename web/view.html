@@ -1,0 +1,1247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#16161e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="apple-mobile-web-app-title" content="omaspace">
+<title>omaspace</title>
+<style>
+  /* Omarchy palette: the host's theme/colors.toml arrives as --t-* variables;
+     the fallbacks are Tokyo Night (Omarchy's default). */
+  /*OMARCHY-THEME*/
+  @font-face { font-family:"OmarchyMono"; src:url("/font.ttf") format("truetype"); font-display:swap; }
+  :root {
+    --bg: var(--t-background, #1a1b26); --panel: var(--t-dark-background, #16161e); --raise: var(--t-lighter-background, #24283b);
+    --line: var(--t-selection, #292e42); --fg: var(--t-bright-foreground, #c0caf5); --dim: var(--t-dark-foreground, #565f89);
+    --accent: var(--t-accent, #7aa2f7); --agent: var(--t-yellow, #e0af68); --ok: var(--t-green, #9ece6a); --bad: var(--t-red, #f7768e);
+    --tap: 44px; --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--panel); color:var(--fg); font:13px/1.4 "JetBrainsMono Nerd Font", "OmarchyMono", ui-monospace, monospace; }
+  body { display:grid; grid-template-rows:auto 1fr auto; height:100dvh; overscroll-behavior:none; -webkit-user-select:none; user-select:none; }
+  /* Home-screen app on iOS: 100dvh stops short of the screen (it leaves the
+     area under the home bar), so fill the whole window instead. */
+  @media (display-mode: standalone) { html, body { height:100vh; } body { position:fixed; inset:0; height:auto; } }
+  /* While the phone keyboard is up, the page is sized to what's left above it
+     (--vvh from visualViewport) and pinned, so iOS can't scroll it away. */
+  body.kbd-up { position:fixed; inset:0 auto auto 0; width:100%; height:var(--vvh, 100dvh); }
+  button, select { font:inherit; color:var(--fg); background:transparent; border:1px solid var(--line); border-radius:6px; cursor:pointer; }
+  button:active { background:var(--raise); }
+
+  /* Top: like the Omarchy bar. One row, never wraps: host, workspaces, presence. */
+  header { display:flex; align-items:center; gap:6px; padding:calc(4px + var(--safe-t)) 8px 4px; background:var(--panel); border-bottom:1px solid var(--line); min-height:40px; }
+  .host { color:var(--accent); font-weight:700; white-space:nowrap; }
+  #spaces { display:flex; gap:2px; flex:1; min-width:0; overflow-x:auto; scrollbar-width:none; }
+  #spaces::-webkit-scrollbar { display:none; }
+  .ws { flex:0 0 auto; min-width:28px; height:28px; padding:0 4px; border:0; border-radius:6px; color:var(--dim); position:relative; }
+  .ws.has { color:var(--fg); }
+  .ws.has::after { content:""; position:absolute; left:50%; bottom:3px; width:4px; height:4px; margin-left:-2px; border-radius:50%; background:currentColor; opacity:.6; }
+  .ws.on { background:var(--accent); color:var(--panel); }
+  .ws.agent { box-shadow: inset 0 -2px 0 var(--agent); }
+  .pill { display:flex; align-items:center; gap:4px; padding:2px 8px; border:1px solid var(--line); border-radius:12px; white-space:nowrap; color:var(--dim); height:26px; }
+  .pill b { color:var(--fg); font-weight:400; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--dim); }
+  .dot.live { background:var(--ok); } .dot.down { background:var(--bad); }
+
+  main { position:relative; overflow:hidden; touch-action:none; background:#000; }
+  canvas#screen { position:absolute; left:0; top:0; transform-origin:0 0; background:#000; outline:none; image-rendering:auto; }
+  #zoom { position:absolute; right:8px; bottom:8px; display:flex; gap:4px; opacity:.55; transition:opacity .2s; }
+  #zoom:hover, #zoom:active { opacity:1; }
+  #zoom button { color:var(--fg); background:color-mix(in srgb, var(--panel) 85%, transparent); width:36px; height:36px; backdrop-filter:blur(6px); }
+  #cursors { position:absolute; inset:0; pointer-events:none; }
+  /* Swipe hint: the workspace you'll land on, at the edge you're swiping toward. */
+  #swipe-peek { position:absolute; top:50%; transform:translateY(-50%); display:none; min-width:52px; height:52px; padding:0 10px; border-radius:26px;
+    align-items:center; justify-content:center; font-size:22px; background:var(--panel); color:var(--dim); border:1px solid var(--line); pointer-events:none; }
+  #swipe-peek.on { display:flex; }
+  #swipe-peek.right { right:14px; } #swipe-peek.left { left:14px; }
+  #swipe-peek.ready { background:var(--accent); color:var(--panel); border-color:var(--accent); }
+  #swipe-peek:empty { display:none; }
+  /* Long-press a tile: it lifts. Drag and a snapshot of the window follows
+     your finger, the tile under it lights up, and letting go swaps them.
+     Let go without dragging and an action sheet comes up from the bottom. */
+  .tile { position:absolute; border:2px solid var(--accent); border-radius:10px; pointer-events:none; }
+  .tile.lifted { box-shadow:0 0 0 9999px rgba(0,0,0,.45); }
+  .tile.lifted.away { border-style:dashed; opacity:.7; }
+  .tile.target { border-width:3px; background:color-mix(in srgb, var(--accent) 22%, transparent); transition:all .12s ease-out; }
+  #ghost { position:absolute; display:none; pointer-events:none; border-radius:10px; overflow:hidden; border:2px solid var(--accent);
+    box-shadow:0 18px 50px rgba(0,0,0,.6); transform-origin:center; will-change:transform; }
+  #ghost.on { display:block; }
+  #ghost canvas { display:block; width:100%; height:100%; }
+  #ghost.settle { transition:transform .18s ease-out, opacity .18s ease-out; }
+  #tile-sheet { position:fixed; left:0; right:0; bottom:0; z-index:20; display:none; background:var(--panel); border-top:1px solid var(--line);
+    border-radius:16px 16px 0 0; padding:8px 12px calc(14px + var(--safe-b)); box-shadow:0 -10px 40px rgba(0,0,0,.5); transform:translateY(100%); transition:transform .18s ease-out; }
+  #tile-sheet.on { display:block; }
+  #tile-sheet.up { transform:none; }
+  #tile-sheet .ttl { padding:4px 4px 10px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #tile-sheet .ttl b { color:var(--fg); font-weight:400; }
+  #tile-sheet .row { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:8px; }
+  #tile-sheet button { height:56px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; border-radius:12px; background:var(--raise); border-color:transparent; }
+  #tile-sheet button .i { font-size:20px; }
+  #tile-sheet button.wide { width:100%; flex-direction:row; gap:8px; font-size:15px; }
+  #tile-sheet button.danger { background:color-mix(in srgb, var(--bad) 16%, var(--panel)); color:var(--bad); }
+  #tile-sheet .ws-row { display:grid; grid-template-columns:repeat(9, 1fr); gap:4px; margin-bottom:10px; }
+  #tile-sheet .ws-row button { height:44px; font-size:15px; padding:0; }
+  #tile-hand button { margin-bottom:8px; }
+  #tile-sheet .lbl2 { color:var(--dim); font-size:11px; margin:2px 4px 6px; }
+  #tile-hint { position:absolute; left:50%; top:10px; transform:translateX(-50%); display:none; padding:6px 12px; border-radius:16px; background:var(--panel); border:1px solid var(--line); pointer-events:none; white-space:nowrap; z-index:5; }
+  #tile-hint.on { display:block; }
+  /* Arrow pad: tap an edge for one arrow; hold and slide to repeat, faster
+     the further you slide (shell history, moving through a line). */
+  #arrows { position:relative; min-width:56px; padding:0; touch-action:none; }
+  #arrows .pad { position:relative; width:40px; height:34px; display:block; }
+  #arrows .pad i { position:absolute; font-style:normal; font-size:9px; line-height:1; color:var(--dim); }
+  #arrows .pad .u { left:50%; top:1px; transform:translateX(-50%); } #arrows .pad .d { left:50%; bottom:1px; transform:translateX(-50%); }
+  #arrows .pad .l { left:2px; top:50%; transform:translateY(-50%); } #arrows .pad .r { right:2px; top:50%; transform:translateY(-50%); }
+  #arrows .pad i.on { color:var(--accent); }
+  #arrows.active { background:var(--raise); border-color:var(--accent); }
+  /* Agent spaces: their workspace in the strip wears the agent's initial;
+     yellow while working, red when it needs you. On its workspace a bar
+     says who it is and what it's doing. */
+  .ws.agent { box-shadow:none; color:var(--agent); }
+  .ws .who { position:absolute; right:1px; top:0; font-size:9px; line-height:1; padding:1px 2px; border-radius:3px; background:var(--agent); color:var(--panel); }
+  .ws.needs .who { background:var(--bad); animation:pulse 1.2s ease-in-out infinite; }
+  .ws.on.agent { color:var(--panel); }
+  @keyframes pulse { 50% { opacity:.4; } }
+  #agent-bar { touch-action:manipulation; position:absolute; left:8px; right:8px; top:8px; z-index:4; display:none; align-items:center; gap:8px; padding:8px 12px; border-radius:12px;
+    background:color-mix(in srgb, var(--panel) 88%, transparent); border:1px solid var(--agent); backdrop-filter:blur(6px); cursor:pointer; }
+  #agent-bar.on { display:flex; }
+  /* The help banner (with Take over) must stay tappable: below the agent bar. */
+  #agent-bar.on ~ #banner, #banner.on { z-index:6; }
+  body:has(#agent-bar.on) #banner { top:64px; }
+  #agent-bar.needs { border-color:var(--bad); }
+  #agent-bar .n { color:var(--agent); font-weight:700; white-space:nowrap; }
+  #agent-bar.needs .n { color:var(--bad); }
+  #agent-bar .s { color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; }
+  #agent-sheet { position:fixed; left:0; right:0; bottom:0; z-index:21; display:none; background:var(--panel); border-top:1px solid var(--line);
+    border-radius:16px 16px 0 0; padding:8px 12px calc(14px + var(--safe-b)); box-shadow:0 -10px 40px rgba(0,0,0,.5); transform:translateY(100%); transition:transform .18s ease-out; }
+  #agent-sheet.on { display:block; } #agent-sheet.up { transform:none; }
+  #agent-sheet .ttl { padding:4px; color:var(--dim); } #agent-sheet .ttl b { color:var(--agent); font-weight:700; }
+  #agent-sheet .task { padding:2px 4px 6px; } #agent-sheet .st { padding:0 4px 10px; color:var(--dim); }
+  #agent-sheet button.wide { width:100%; height:52px; margin-bottom:8px; display:flex; align-items:center; justify-content:center; gap:8px; font-size:15px; border-radius:12px; background:var(--raise); border-color:transparent; }
+  #agent-sheet button.done { background:color-mix(in srgb, var(--ok) 18%, var(--panel)); color:var(--ok); }
+  /* Machine switcher: tap the host name (or the ⇄ on phones). */
+  #host { cursor:pointer; display:flex; align-items:center; gap:4px; }
+  #host::after { content:"\25BE"; color:var(--dim); font-size:10px; }
+  #machines-btn { display:none; }
+  #machines { position:absolute; left:8px; top:8px; width:min(340px, calc(100% - 16px)); display:none; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px; z-index:12; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  #machines.on { display:block; }
+  #machines .m { display:flex; align-items:center; gap:10px; width:100%; padding:10px; border:1px solid transparent; border-radius:10px; text-align:left; margin-bottom:4px; background:var(--raise); }
+  #machines .m.here { border-color:var(--accent); }
+  #machines .m .n { font-weight:700; }
+  #machines .m .d { color:var(--dim); font-size:11px; }
+  #machines .m .who { margin-left:auto; display:flex; gap:6px; align-items:center; color:var(--dim); font-size:12px; }
+  #machines .m .who .ag { color:var(--agent); }
+  #machines .m[disabled] { opacity:.5; }
+  #machines .head { color:var(--dim); padding:2px 4px 8px; }
+  /* Hold to talk: a level meter while recording, then "transcribing…". */
+  #mic-btn.rec { background:var(--bad); color:var(--panel); border-color:var(--bad); }
+  #mic-btn.busy { opacity:.6; }
+  #talk { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); display:none; align-items:center; gap:10px; padding:10px 16px;
+    border-radius:22px; background:var(--panel); border:1px solid var(--line); pointer-events:none; white-space:nowrap; max-width:92%; }
+  #talk.on { display:flex; }
+  #talk .bars { display:flex; gap:3px; align-items:center; height:22px; }
+  #talk .bars i { width:4px; border-radius:2px; background:var(--bad); height:4px; transition:height .08s; }
+  #talk .txt { overflow:hidden; text-overflow:ellipsis; }
+  .cursor { position:absolute; transform:translate(-2px,-2px); transition:left .06s linear, top .06s linear; }
+  .cursor svg { width:18px; height:18px; display:block; }
+  .cursor span { position:absolute; left:16px; top:14px; font-size:11px; padding:1px 5px; border-radius:4px; background:var(--accent); color:var(--panel); white-space:nowrap; }
+  .cursor.agent span { background:var(--agent); }
+  #banner { position:absolute; top:10px; left:50%; transform:translateX(-50%); display:none; gap:8px; align-items:center; padding:8px 12px; border:1px solid var(--agent); background:var(--panel); border-radius:8px; max-width:92%; }
+  #banner.on { display:flex; }
+  #banner button, aside button, #files button { padding:6px 10px; }
+  #banner button.primary { border-color:var(--agent); color:var(--agent); }
+
+  /* Sheets: Windows and Files slide up from the dock on phones, sit at the side on laptops. */
+  aside, #files { position:absolute; right:8px; top:8px; bottom:8px; width:min(360px,90vw); background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:auto; display:none; padding:8px; -webkit-user-select:text; user-select:text; }
+  #files { left:8px; right:auto; }
+  aside.on, #files.on { display:block; }
+  .win { border:1px solid var(--line); border-radius:8px; padding:8px; margin-bottom:6px; }
+  .win.focused { border-color:var(--accent); }
+  .win .t { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .win .c { color:var(--dim); font-size:11px; }
+  .win .row1 { display:flex; flex-direction:column; gap:6px; }
+  .win .tt { cursor:pointer; min-width:0; }
+  .win .acts { display:flex; gap:4px; flex-wrap:wrap; }
+  .win .acts button, .win .acts select { height:32px; padding:0 8px; font-size:12px; }
+  .win .acts button.danger { color:var(--bad); }
+  .grab { display:none; width:40px; height:4px; border-radius:2px; background:var(--line); margin:0 auto 8px; }
+  .group { color:var(--dim); margin:10px 2px 4px; }
+  #files .row { display:flex; align-items:center; gap:8px; padding:8px 4px; border-bottom:1px solid var(--line); }
+  #files .row .n { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #files .row .s { color:var(--dim); font-size:11px; }
+  #files a { color:var(--accent); text-decoration:none; }
+  #files .head { display:flex; gap:6px; align-items:center; margin-bottom:6px; }
+  .spacer { flex:1; }
+
+  /* Bottom dock: the keys you can't type on a phone, then Omarchy actions. */
+  footer { display:flex; gap:6px; padding:6px 8px calc(6px + var(--safe-b)); background:var(--panel); border-top:1px solid var(--line); align-items:center; }
+  .keys, .acts-bar { display:flex; gap:4px; }
+  .acts-bar { overflow-x:auto; scrollbar-width:none; flex:1; min-width:0; }
+  .acts-bar::-webkit-scrollbar { display:none; }
+  footer button { flex:0 0 auto; height:36px; min-width:36px; padding:0 10px; display:flex; align-items:center; justify-content:center; gap:4px; white-space:nowrap; }
+  footer button .i { font-size:16px; line-height:1; }
+  footer button.held, #kbd-btn.up { background:var(--accent); color:var(--panel); border-color:var(--accent); }
+  .sep { width:1px; align-self:stretch; background:var(--line); margin:4px 2px; }
+  #more-btn { display:none; }
+  #more-btn.on { background:var(--accent); color:var(--panel); border-color:var(--accent); }
+  /* Off-screen input that catches the phone keyboard: fixed at the top-left so
+     focusing it never makes iOS scroll the page to bring it into view. */
+  #kbd { position:fixed; top:0; left:0; opacity:0; width:1px; height:1px; font-size:16px; pointer-events:none; }
+  #status { display:none; }
+  #toasts { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); display:flex; flex-direction:column; gap:4px; pointer-events:none; }
+  .toast { background:var(--panel); border:1px solid var(--accent); border-radius:6px; padding:6px 12px; white-space:nowrap; }
+  #drop { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:color-mix(in srgb, var(--accent) 18%, transparent); border:2px dashed var(--accent); font-size:18px; pointer-events:none; }
+  #drop.on { display:flex; }
+
+  /* Phones: bigger tap targets, icon-only dock, sheets from the bottom. */
+  @media (max-width: 600px) {
+    #stats, .lbl, .host { display:none; }
+    #machines-btn { display:flex; }
+    /* The dock keeps the keys; Omarchy actions live in a sheet above it. */
+    #more-btn { display:flex; margin-left:auto; }
+    /* Phones dictate with the keyboard's own mic (Apple/Google speech); the
+       hold-to-talk button (voxtype on the machine) stays for laptops. */
+    #mic-btn { display:none; }
+    .sep { display:none; }
+    .acts-bar { display:none; position:fixed; left:8px; right:8px; bottom:calc(var(--tap) + 20px + var(--safe-b)); z-index:5;
+      grid-template-columns:repeat(3, 1fr); gap:8px; padding:10px; background:var(--panel); border:1px solid var(--line); border-radius:14px;
+      box-shadow:0 10px 40px rgba(0,0,0,.5); }
+    .acts-bar.on { display:grid; }
+    .acts-bar button { height:64px; flex-direction:column; gap:6px; font-size:12px; }
+    .acts-bar button .i { font-size:22px; }
+    .acts-bar .lbl { display:inline; }
+    .ws { min-width:32px; height:32px; }
+    footer button { height:var(--tap); min-width:var(--tap); padding:0 8px; }
+    .keys button { min-width:46px; font-size:12px; }
+    aside, #files { left:0; right:0; top:auto; bottom:0; width:auto; max-height:70%; border-radius:14px 14px 0 0; border-bottom:0; padding:8px 12px calc(12px + var(--safe-b)); }
+    .grab { display:block; }
+  }
+</style>
+</head>
+<body>
+<header id="top">
+  <span class="host" id="host" title="Your machines">omaspace</span>
+  <span id="spaces"></span>
+  <span class="pill" id="people" role="button" title="Your machines"></span>
+  <span class="pill" id="stats"></span>
+</header>
+<main id="stage">
+  <canvas id="screen" tabindex="0"></canvas>
+  <div id="zoom"><button id="zoom-out" title="Zoom out">−</button><button id="zoom-fit" title="Fit / readable">⤢</button><button id="zoom-in" title="Zoom in">+</button></div>
+  <div id="cursors"></div>
+  <div id="swipe-peek"></div>
+  <div id="tiles"></div>
+  <div id="ghost"><canvas></canvas></div>
+  <div id="agent-bar"><span class="i">󰚩</span><span class="n"></span><span class="s"></span></div>
+  <div id="machines"><div class="head">Your machines</div><div id="machines-list"></div></div>
+  <div id="tile-hint"></div>
+  <div id="banner"><span id="banner-text"></span><button class="primary" id="takeover">Take over</button><button id="dismiss">Later</button></div>
+  <aside id="panel"></aside>
+  <div id="files"><div class="head"><b id="files-path">~/Downloads</b><span class="spacer"></span><button id="upload-btn">Upload</button><button id="files-close">✕</button></div><div id="files-list"></div></div>
+  <div id="drop">Drop to send to this machine's Downloads</div>
+  <div id="toasts"></div>
+  <div id="talk"><span class="bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="txt"></span></div>
+  <input type="file" id="file-input" multiple hidden>
+</main>
+<div id="agent-sheet">
+  <div class="grab" style="display:block"></div>
+  <div class="ttl"></div><div class="task"></div><div class="st"></div>
+  <button class="wide watch"><span class="i">󰛐</span>Watch</button>
+  <button class="wide done"><span class="i">󰄬</span>Done, hand back to the agent</button>
+  <div class="browsers"></div>
+</div>
+<div id="tile-sheet">
+  <div class="grab" style="display:block"></div>
+  <div class="ttl" id="tile-title"></div>
+  <div class="row">
+    <button id="tile-full"><span class="i">󰊓</span>Fullscreen</button>
+    <button id="tile-float"><span class="i">󰖯</span><span id="tile-float-l">Float</span></button>
+    <button id="tile-menu"><span class="i">󰍜</span>Right-click</button>
+  </div>
+  <div class="lbl2">Move to workspace</div>
+  <div class="ws-row" id="tile-ws"></div>
+  <div id="tile-hand"></div>
+  <button id="tile-close" class="wide danger"><span class="i">󰅖</span>Close window</button>
+</div>
+<footer>
+  <div class="keys">
+    <button data-mod="64" title="Hold SUPER for the next key"><span class="i">󰘳</span><span class="lbl">SUPER</span></button>
+    <button data-mod="1" title="Shift">⇧<span class="lbl"> SHIFT</span></button>
+    <button data-mod="4" title="Ctrl">ctrl</button>
+    <button data-mod="8" title="Alt">alt</button>
+    <button id="kbd-btn" title="Keyboard"><span class="i">󰌌</span></button>
+    <button id="arrows" title="Arrows: tap an edge, or hold and slide to keep pressing (like a terminal's cursor keys)"><span class="pad"><i class="u">▲</i><i class="l">◀</i><i class="r">▶</i><i class="d">▼</i></span></button>
+    <button id="mic-btn" title="Hold to talk: types what you say into the focused window"><span class="i">󰍬</span></button>
+  </div>
+  <span class="sep"></span>
+  <button id="more-btn" title="Omarchy"><span class="i">󰣇</span></button>
+  <div class="acts-bar" id="acts">
+    <button data-omarchy="menu" title="Omarchy menu"><span class="i">󰣇</span><span class="lbl">Menu</span></button>
+    <button data-omarchy="launcher" title="Apps"><span class="i">󰀻</span><span class="lbl">Apps</span></button>
+    <button data-omarchy="terminal" title="Terminal"><span class="i"></span><span class="lbl">Terminal</span></button>
+    <button id="windows-btn" title="Windows"><span class="i">󰖯</span><span class="lbl">Windows</span></button>
+    <button id="files-btn" title="Files"><span class="i">󰉋</span><span class="lbl">Files</span></button>
+    <button id="mode-btn" title="Switch between a phone-shaped screen and the whole desktop"></button>
+    <button id="handback" style="display:none">Hand back to agent</button>
+  </div>
+  <span id="status">connecting…</span>
+  <input id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false">
+</footer>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const canvas = $("screen"), ctx = canvas.getContext("2d");
+let ws, decoder, state = { windows: [], workspaces: [] }, me = 0, myName = "", stream = { width: 1, height: 1 };
+let needKey = false, dropped = 0;
+let heldMods = 0, bytes = 0, frames = 0, lastStat = performance.now(), takenOverBy = null, configured = false, configuring = false, hwMode = "", decoded = 0;
+
+// ---- connection -----------------------------------------------------------
+const phoneMode = () => (params.get("mode") || (Math.min(innerWidth, innerHeight) < 600 ? "phone" : "desktop")) === "phone";
+let phoneShape = "";
+function connect() {
+  // Full resolution: a phone zooms into the real pixels instead of getting a
+  // pre-shrunk picture whose text can't be read at any zoom.
+  const w = 3840;
+  const q = new URLSearchParams({ w, name: params.get("name") || "" });
+  // Phone mode (default on small screens): the remote makes a virtual screen
+  // the shape of this one, so Omarchy tiles for it and apps go mobile-width.
+  if (phoneMode()) {
+    const stage = document.getElementById("stage").getBoundingClientRect();
+    phoneShape = `${Math.round(stage.width * devicePixelRatio)}x${Math.round(stage.height * devicePixelRatio)}`;
+    q.set("phone", phoneShape);
+    q.set("scale", String(Math.min(3, Math.max(1, devicePixelRatio))));
+    // Reconnecting (new shape, network blip): stay on the workspace in view.
+    const ws0 = state.active_workspace || params.get("workspace");
+    if (ws0) q.set("workspace", String(ws0));
+  }
+  if (params.get("window")) q.set("window", params.get("window"));
+  ws = new WebSocket(`wss://${location.host}/ws?${q}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { $("status").textContent = "live"; setLink("live"); };
+  ws.onclose = () => { $("status").textContent = "reconnecting…"; setLink("down"); resetDecoder(); setTimeout(connect, 1000); };
+  ws.onmessage = e => typeof e.data === "string" ? onText(JSON.parse(e.data)) : onFrame(new Uint8Array(e.data));
+}
+const send = m => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
+let linkState = "";
+function setLink(st) { linkState = st; const d = document.querySelector("#people .dot"); if (d) d.className = "dot " + st; else $("people").innerHTML = `<span class="dot ${st}"></span>`; }
+
+// ---- video: WebCodecs H.264 ------------------------------------------------
+function resetDecoder() { try { decoder && decoder.close(); } catch {} decoder = null; configured = false; configuring = false; }
+function avcCodec(au) {
+  // avc1.PPCCLL from the SPS (NAL type 7) in a keyframe.
+  for (let i = 0; i + 4 < au.length; i++) {
+    if (au[i] === 0 && au[i+1] === 0 && au[i+2] === 1 && (au[i+3] & 0x1f) === 7) {
+      const h = b => b.toString(16).padStart(2, "0");
+      return `avc1.${h(au[i+4])}${h(au[i+5])}${h(au[i+6])}`;
+    }
+  }
+  return "avc1.640028";
+}
+function onFrame(buf) {
+  if (buf[0] !== 1) return;
+  const key = buf[1] === 1;
+  const pts = Number(new DataView(buf.buffer, buf.byteOffset + 2, 8).getBigUint64(0));
+  const data = buf.subarray(10);
+  bytes += buf.length; frames++;
+  if (!decoder) {
+    decoder = new VideoDecoder({
+      output: f => {
+        decoded++;
+        // A new shape (a reshaped phone screen keeps its width but not its
+        // height): resize the canvas and fit again.
+        if (canvas.width !== f.displayWidth || canvas.height !== f.displayHeight) {
+          canvas.width = f.displayWidth; canvas.height = f.displayHeight;
+          const small = Math.min(innerWidth, innerHeight) < 600;
+          phoneMode() ? fit() : small ? readableOn(focusedRect()) : fit();
+        }
+        ctx.drawImage(f, 0, 0); f.close();
+      },
+      error: e => { $("status").textContent = "decoder: " + e.message; resetDecoder(); },
+    });
+  }
+  if (!configured) {
+    if (!key || configuring) return;
+    configuring = true;
+    // Ask, don't assume: hardware decode when the device has it, else software.
+    const codec = avcCodec(data);
+    (async () => {
+      for (const hardwareAcceleration of ["prefer-hardware", "no-preference"]) {
+        const cfg = { codec, optimizeForLatency: true, hardwareAcceleration };
+        if ((await VideoDecoder.isConfigSupported(cfg)).supported) { decoder.configure(cfg); configured = true; hwMode = hardwareAcceleration; break; }
+      }
+      configuring = false;
+      if (!configured) $("status").textContent = "this browser can't decode " + codec;
+    })();
+    return;
+  }
+  // H.264 delta frames build on the ones before them: drop one and every
+  // frame after it draws over a picture that doesn't exist (the smeared
+  // blocks). So once anything is dropped, decode nothing until the next
+  // keyframe (at most 0.5s away); the last good picture stays up meanwhile.
+  if (needKey && !key) return;
+  if (decoder.decodeQueueSize > 3 && !key) { needKey = true; dropped++; return; }
+  needKey = false;
+  decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data }));
+}
+setInterval(() => {
+  const s = (performance.now() - lastStat) / 1000;
+  $("stats").innerHTML = `<b>${(bytes * 8 / s / 1e6).toFixed(2)}</b> Mb/s · <b>${(decoded / s).toFixed(0)}</b> fps · ${stream.width}×${stream.height}${hwMode === "prefer-hardware" ? " · hw" : ""}`;
+  bytes = 0; frames = 0; decoded = 0; lastStat = performance.now();
+}, 1000);
+
+// ---- state: Omarchy workspaces, windows, people ----------------------------
+function onText(m) {
+  if (m.type === "hello") { me = m.id; myName = m.me; stream = m.stream; outputSize = m.output || outputSize; $("host").textContent = location.hostname.split(".")[0]; }
+  if (m.type === "state") {
+    state = m; renderSpaces(); renderPanel();
+    if (m.origin) outputOrigin = m.origin;
+    // The lifted window may have moved, closed or changed workspace.
+    if (lifted) { const w = state.windows.find(x => x.address === lifted.w.address && x.workspace === state.active_workspace); w ? (lifted.w = w, drawTiles()) : drop(); }
+  }
+  if (m.type === "cursors") renderCursors(m.participants);
+  if (m.type === "toast") toast(m.text, 4000);
+  if (m.type === "help") { $("banner-text").textContent = "🤖 " + m.message; $("banner").classList.add("on"); }
+  if (m.type === "control") {
+    takenOverBy = m.taken_over_by;
+    $("handback").style.display = takenOverBy ? "" : "none";
+    if (takenOverBy) $("banner").classList.remove("on");
+  }
+}
+const agentOn = ws => (state.agents || []).find(a => a.workspace === ws);
+function renderSpaces() {
+  $("spaces").innerHTML = "";
+  for (const w of state.workspaces) {
+    const a = agentOn(w.id);
+    const b = document.createElement("button");
+    b.className = "ws" + (w.windows ? " has" : "") + (w.id === state.active_workspace ? " on" : "") + (a ? " agent" + (a.help ? " needs" : "") : "");
+    b.dataset.ws = w.id;
+    b.textContent = w.id;
+    if (a) { const tag = document.createElement("span"); tag.className = "who"; tag.textContent = a.agent[0].toUpperCase(); b.append(tag); }
+    b.title = a ? `${a.agent}: ${a.help || a.status || a.task}` : `${w.windows} window(s)`;
+    // An agent's workspace: tap to watch it; tap again (while there) for its sheet.
+    b.onclick = () => { if (a && w.id === state.active_workspace) openAgentSheet(a.agent); else send({ type: "focus_workspace", workspace: w.id }); };
+    $("spaces").append(b);
+  }
+  renderAgentBar();
+}
+/** On an agent's workspace: a bar with its name, task and status. */
+function renderAgentBar() {
+  const a = agentOn(state.active_workspace), bar = $("agent-bar");
+  if (!a) { bar.classList.remove("on"); return; }
+  bar.classList.add("on"); bar.classList.toggle("needs", !!a.help);
+  bar.querySelector(".n").textContent = a.agent;
+  bar.querySelector(".s").textContent = a.help ? "needs you: " + a.help : (a.status || a.task || "working");
+  bar.onclick = () => openAgentSheet(a.agent);
+  // Waiting for you: the banner, once per request.
+  if (a.help && a.help !== shownHelp[a.agent]) { shownHelp[a.agent] = a.help; showHelp(a); }
+}
+const shownHelp = {};
+function showHelp(a) {
+  $("banner-text").textContent = `\u{f06a9} ${a.agent}: ${a.help}`;
+  $("banner").classList.add("on");
+  $("banner").dataset.agent = a.agent;
+}
+/** Agent sheet: what it's doing, its browsers (take back), help, stop. */
+function openAgentSheet(name) {
+  const a = (state.agents || []).find(x => x.agent === name);
+  if (!a) return;
+  const sh = $("agent-sheet");
+  sh.querySelector(".ttl").innerHTML = "";
+  const b = document.createElement("b"); b.textContent = a.agent;
+  sh.querySelector(".ttl").append(b, document.createTextNode(`  workspace ${a.workspace}`));
+  sh.querySelector(".task").textContent = a.task || "";
+  sh.querySelector(".st").textContent = a.help ? "Needs you: " + a.help : (a.status || "");
+  const list = sh.querySelector(".browsers"); list.innerHTML = "";
+  for (const br of a.browsers) {
+    const btn = document.createElement("button"); btn.className = "wide"; btn.dataset.browser = br.id;
+    btn.innerHTML = `<span class="i">\u{f059f}</span>Take this browser back`;
+    btn.onclick = () => { send({ type: "take_back_browser", agent: a.agent, browser: br.id }); closeAgentSheet(); };
+    list.append(btn);
+  }
+  sh.querySelector(".done").style.display = a.help ? "" : "none";
+  sh.querySelector(".done").onclick = () => { send({ type: "help_done", agent: a.agent }); closeAgentSheet(); };
+  sh.querySelector(".watch").onclick = () => { send({ type: "focus_workspace", workspace: a.workspace }); closeAgentSheet(); };
+  sh.classList.add("on"); requestAnimationFrame(() => sh.classList.add("up"));
+}
+function closeAgentSheet() { const sh = $("agent-sheet"); sh.classList.remove("up"); setTimeout(() => sh.classList.remove("on"), 180); }
+let panelKey = "";
+function renderPanel() {
+  // Rebuild only when what it shows changed: state arrives on every Hyprland
+  // event, and rebuilding under a finger (or a click) swallows the tap.
+  const key = JSON.stringify([state.focused, state.windows.map(w => [w.address, w.title, w.class, w.workspace, w.floating, w.fullscreen]), params.get("window")]);
+  if (key === panelKey) return;
+  panelKey = key;
+  const p = $("panel"); p.innerHTML = `<div class="grab"></div>`;
+  const byWs = {};
+  for (const w of state.windows) (byWs[w.workspace] ??= []).push(w);
+  for (const ws of Object.keys(byWs).sort((a, b) => a - b)) {
+    const g = document.createElement("div"); g.className = "group"; g.textContent = `Workspace ${ws}`; p.append(g);
+    for (const w of byWs[ws]) {
+      const d = document.createElement("div");
+      d.className = "win" + (w.address === state.focused ? " focused" : "");
+      d.dataset.address = w.address;
+      d.innerHTML = `<div class="row1"><div class="tt"><div class="t"></div><div class="c"></div></div><div class="acts"></div></div>`;
+      d.querySelector(".t").textContent = w.title || w.class;
+      d.querySelector(".c").textContent = `${w.class}${w.floating ? " · floating" : ""}${w.fullscreen ? " · fullscreen" : ""}`;
+      // Tapping the card focuses the window (and closes the sheet on a phone).
+      d.querySelector(".tt").onclick = () => { send({ type: "focus_window", address: w.address }); if (phoneMode()) $("panel").classList.remove("on"); };
+      const acts = d.querySelector(".acts");
+      // A text label, or an icon with the label as its tooltip.
+      const act = (label, msg, icon) => {
+        const b = document.createElement("button");
+        if (icon) { b.innerHTML = `<span class="i">${icon}</span>`; b.title = label; } else b.textContent = label;
+        b.onclick = () => send({ ...msg, address: w.address });
+        acts.append(b);
+        return b;
+      };
+      act("Focus", { type: "focus_window" });
+      act(w.floating ? "Tile" : "Float", { type: "toggle_floating" });
+      act("Fullscreen", { type: "fullscreen" }, "\u{f0293}");
+      act("Close", { type: "close_window" }, "\u{f0156}").classList.add("danger");
+      const mv = document.createElement("select");
+      mv.title = "Move to workspace";
+      mv.innerHTML = `<option>Move to…</option>` + [1,2,3,4,5,6,7,8,9].map(n => `<option value="${n}">${n}</option>`).join("");
+      mv.onchange = () => { if (+mv.value) send({ type: "move_window", address: w.address, workspace: +mv.value }); mv.selectedIndex = 0; };
+      acts.append(mv);
+      const solo = document.createElement("button"); solo.innerHTML = '<span class="i">\u{f0349}</span>'; solo.title = "View only this";
+      solo.onclick = () => { location.search = new URLSearchParams({ ...Object.fromEntries(params), window: w.address }); };
+      acts.append(solo);
+      p.append(d);
+    }
+  }
+  if (params.get("window")) {
+    const all = document.createElement("button"); all.textContent = "Back to whole desktop";
+    all.onclick = () => { params.delete("window"); location.search = params; };
+    p.prepend(all);
+  }
+}
+let lastAgents = [];
+const ARROW = c => `<svg viewBox="0 0 18 18"><path d="M2 1 L2 15 L6 11 L9 17 L11 16 L8 10 L14 10 Z" fill="${c}" stroke="#000" stroke-width="1"/></svg>`;
+let lastCursors = null;
+function renderCursors(list) {
+  lastCursors = list;
+  lastAgents = list.filter(p => p.kind === "agent");
+  const stage = $("stage").getBoundingClientRect();
+  const box = { left: stage.left + view.x, top: stage.top + view.y, width: canvas.width * view.s, height: canvas.height * view.s };
+  const layer = $("cursors"); layer.innerHTML = "";
+  for (const p of list) {
+    if (p.id === me || p.x < 0) continue;
+    const d = document.createElement("div");
+    d.className = "cursor " + p.kind;
+    d.style.left = (box.left - stage.left + p.x * box.width) + "px";
+    d.style.top = (box.top - stage.top + p.y * box.height) + "px";
+    d.innerHTML = ARROW(p.kind === "agent" ? "#e0af68" : "#7aa2f7") + `<span></span>`;
+    d.querySelector("span").textContent = p.name;
+    layer.append(d);
+  }
+  const humans = list.filter(p => p.kind === "human").length;
+  $("people").innerHTML = `<span class="dot ${linkState}"></span><b>${humans}</b><span class="lbl"> watching</span>${lastAgents.length ? ` · <b style="color:var(--agent)">${lastAgents.length}</b><span class="lbl"> agent</span>` : ""}`;
+  renderSpaces();
+}
+
+// ---- view: zoom + pan ---------------------------------------------------------
+// view.s = CSS px per stream px; view.x/y = stream top-left in stage CSS px.
+const stageEl = $("stage");
+const view = { s: 1, x: 0, y: 0, fitted: true, touched: false };
+const fitScale = () => Math.min(stageEl.clientWidth / (canvas.width || 1), stageEl.clientHeight / (canvas.height || 1));
+// Readable: one stream pixel per CSS pixel (text at its real size), like a laptop.
+const readableScale = () => Math.max(fitScale(), Math.min(1, 0.85));
+function clampView() {
+  const w = canvas.width * view.s, h = canvas.height * view.s, W = stageEl.clientWidth, H = stageEl.clientHeight;
+  view.x = w <= W ? (W - w) / 2 : Math.min(0, Math.max(W - w, view.x));
+  view.y = h <= H ? (H - h) / 2 : Math.min(0, Math.max(H - h, view.y));
+}
+function applyView() {
+  clampView();
+  canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+  canvas.style.width = canvas.width + "px"; canvas.style.height = canvas.height + "px";
+  if (lastCursors) renderCursors(lastCursors);
+  if (lifted) drawTiles();
+}
+function zoomAt(s, cx, cy) {
+  const minS = fitScale(), maxS = 4;
+  s = Math.min(maxS, Math.max(minS, s));
+  // keep the stream point under (cx, cy) fixed
+  const px = (cx - view.x) / view.s, py = (cy - view.y) / view.s;
+  view.s = s; view.x = cx - px * s; view.y = cy - py * s; view.fitted = Math.abs(s - minS) < 1e-3;
+  applyView();
+}
+function fit() { view.s = fitScale(); view.fitted = true; applyView(); }
+/** Zoom to readable size centred on a stream rectangle (the focused window). */
+function readableOn(rect) {
+  const s = readableScale();
+  const [x, y, w, h] = rect || [0, 0, canvas.width, canvas.height];
+  view.s = s; view.fitted = false;
+  view.x = stageEl.clientWidth / 2 - (x + Math.min(w, stageEl.clientWidth / s) / 2) * s;
+  view.y = 8 - y * s;
+  applyView();
+}
+function focusedRect() {
+  const w = state.windows.find(w => w.address === state.focused);
+  if (!w || !canvas.width) return null;
+  const k = canvas.width / (outputSize.width || canvas.width);
+  return [w.at[0] * k, w.at[1] * k, w.size[0] * k, w.size[1] * k];
+}
+let outputSize = { width: 0, height: 0 };
+new ResizeObserver(() => { kbdView ? keyboardView() : view.fitted ? fit() : applyView(); reshapePhone(); }).observe(stageEl);
+// The phone's screen on the machine is made the shape of this view. If the
+// view settles into a different shape (rotated, or opened as a home-screen
+// app, which is taller than a Safari tab), make a new screen that fits,
+// instead of showing the old one with black bars. Not while typing: the
+// keyboard only borrows the space.
+let reshapeTimer = 0;
+function reshapePhone() {
+  if (!phoneMode() || !phoneShape || kbdView || document.body.classList.contains("kbd-up")) return;
+  clearTimeout(reshapeTimer);
+  reshapeTimer = setTimeout(() => {
+    const r = stageEl.getBoundingClientRect();
+    const shape = `${Math.round(r.width * devicePixelRatio)}x${Math.round(r.height * devicePixelRatio)}`;
+    const [w0, h0] = phoneShape.split("x").map(Number), [w1, h1] = shape.split("x").map(Number);
+    // Small changes (a few pixels of browser chrome) aren't worth a new screen.
+    if (Math.abs(w1 - w0) < 24 && Math.abs(h1 - h0) < 48) return;
+    if (ws) { ws.onclose = null; ws.close(); }
+    resetDecoder();
+    connect();
+  }, 600);
+}
+$("zoom-in").onclick = () => zoomAt(view.s * 1.5, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
+$("zoom-out").onclick = () => zoomAt(view.s / 1.5, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
+$("zoom-fit").onclick = () => view.fitted ? readableOn(focusedRect()) : fit();
+
+// ---- input -----------------------------------------------------------------
+/** Stage CSS point → normalized stream position. */
+function streamPos(clientX, clientY) {
+  const r = stageEl.getBoundingClientRect();
+  return { x: (clientX - r.left - view.x) / view.s / canvas.width, y: (clientY - r.top - view.y) / view.s / canvas.height };
+}
+const pos = e => streamPos(e.clientX, e.clientY);
+
+// Mouse / pen: direct pointer (desktop browsers).
+stageEl.addEventListener("pointermove", e => { if (e.pointerType !== "touch") send({ type: "pointer", ...pos(e) }); });
+stageEl.addEventListener("pointerdown", e => {
+  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #files")) return;
+  canvas.focus(); stageEl.setPointerCapture(e.pointerId);
+  send({ type: "pointer", ...pos(e), button: e.button, down: true }); e.preventDefault();
+});
+stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #files")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
+stageEl.addEventListener("contextmenu", e => e.preventDefault());
+stageEl.addEventListener("wheel", e => {
+  e.preventDefault();
+  if (e.ctrlKey) { const r = stageEl.getBoundingClientRect(); zoomAt(view.s * Math.exp(-e.deltaY / 200), e.clientX - r.left, e.clientY - r.top); }
+  else send({ type: "scroll", dx: e.deltaX / 4, dy: e.deltaY / 4 });
+}, { passive: false });
+
+// Touch: one finger pans (or scrolls the app when zoomed out), tap = click,
+// long-press = right click, double-tap = fit ⇄ readable, two fingers = pinch
+// zoom + pan. A two-finger tap scrolls nothing and clicks nothing.
+const touches = new Map();
+let gesture = null, lastTapPos = null, kbdView = null;
+
+// ---- tiles: long-press to lift a window, drag onto another to swap, or close ----
+// Window geometry comes from Hyprland state (stream pixels), so the outline is
+// exactly the tile, and the swap is Hyprland's own (hl.dsp.window.swap).
+let lifted = null; // { w, target }
+/** Windows you can touch on the workspace in view. A fullscreen window
+ *  covers everything: it's the only one (nothing behind it can be lifted or
+ *  swapped with). Otherwise floating windows first, then most recently
+ *  focused, so overlapping windows resolve to the one drawn on top. */
+function windowsHere() {
+  const ws = state.active_workspace;
+  const here = state.windows.filter(w => w.workspace === ws && w.mapped !== false && !w.hidden);
+  const full = here.filter(w => w.fullscreen);
+  if (full.length) return full.slice(0, 1);
+  return here.sort((a, b) => (Number(b.floating) - Number(a.floating)) || ((a.focus ?? 99) - (b.focus ?? 99)));
+}
+/** Stream rect (CSS px in the stage) of a Hyprland window. */
+function tileRect(w) {
+  // Hyprland geometry is logical; the stream is device pixels (a phone screen
+  // runs at its scale, e.g. 3x). origin.w is the monitor's logical width.
+  const k = canvas.width / (outputOrigin.w || outputSize.width || canvas.width), mx = outputOrigin.x, my = outputOrigin.y;
+  return { x: view.x + (w.at[0] - mx) * k * view.s, y: view.y + (w.at[1] - my) * k * view.s, w: w.size[0] * k * view.s, h: w.size[1] * k * view.s };
+}
+function windowAt(sx, sy) {
+  const r = stageEl.getBoundingClientRect(), x = sx - r.left, y = sy - r.top;
+  const list = windowsHere();
+  return list.find(w => { const t = tileRect(w); return x >= t.x && y >= t.y && x < t.x + t.w && y < t.y + t.h; }) || null;
+}
+function drawTiles() {
+  const layer = $("tiles"); layer.innerHTML = "";
+  const sheet = $("tile-sheet"), hint = $("tile-hint"), ghost = $("ghost");
+  if (!lifted) {
+    hint.classList.remove("on"); if (!ghost.dataset.settling) ghost.classList.remove("on");
+    sheet.classList.remove("up"); setTimeout(() => { if (!lifted) sheet.classList.remove("on"); }, 180);
+    return;
+  }
+  const box = (w, cls) => { const t = tileRect(w), d = document.createElement("div"); d.className = "tile " + cls;
+    Object.assign(d.style, { left: t.x + "px", top: t.y + "px", width: t.w + "px", height: t.h + "px" }); layer.append(d); return t; };
+  box(lifted.w, "lifted" + (lifted.dragging ? " away" : ""));
+  if (lifted.target) box(lifted.target, "target");
+  hint.textContent = lifted.target ? `Let go to swap` : lifted.dragging ? "Drag onto another window" : "Drag to swap, or let go for actions";
+  hint.classList.toggle("on", !lifted.sheet);
+}
+/** A snapshot of the lifted window from the current video frame. */
+function makeGhost(w) {
+  const t = tileRect(w), g = $("ghost"), c = g.querySelector("canvas");
+  const k = canvas.width / (outputOrigin.w || canvas.width);
+  const sx = (w.at[0] - outputOrigin.x) * k, sy = (w.at[1] - outputOrigin.y) * k, sw = w.size[0] * k, sh = w.size[1] * k;
+  c.width = Math.max(1, Math.round(Math.min(sw, 900))); c.height = Math.max(1, Math.round(c.width * sh / sw));
+  c.getContext("2d").drawImage(canvas, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  Object.assign(g.style, { left: t.x + "px", top: t.y + "px", width: t.w + "px", height: t.h + "px", opacity: "1" });
+  g.classList.remove("settle"); g.classList.add("on");
+  lifted.ghost = { t, ox: 0, oy: 0 };
+}
+/** Ghost follows the finger: shrunk a little, centred under it. */
+function moveGhost(px, py) {
+  const g = $("ghost"), r = stageEl.getBoundingClientRect(), t = lifted.ghost.t;
+  const s = Math.min(1, Math.max(0.35, 160 / Math.max(t.w, t.h)));
+  const dx = px - r.left - (t.x + t.w / 2), dy = py - r.top - (t.y + t.h / 2);
+  g.style.transform = `translate(${dx}px, ${dy}px) scale(${s})`;
+}
+/** Animate the ghost into a rect (or back home), then hide it. */
+function settleGhost(to) {
+  const g = $("ghost"), t = lifted.ghost.t;
+  g.dataset.settling = "1";
+  g.classList.add("settle");
+  const dest = to || t;
+  const s = dest.w / t.w;
+  g.style.transform = `translate(${dest.x + dest.w / 2 - (t.x + t.w / 2)}px, ${dest.y + dest.h / 2 - (t.y + t.h / 2)}px) scale(${s}, ${dest.h / t.h})`;
+  g.style.opacity = "0.15";
+  setTimeout(() => { g.classList.remove("on", "settle"); g.style.transform = ""; delete g.dataset.settling; }, 190);
+}
+function lift(w, at) {
+  lifted = { w, target: null, dragging: false, at };
+  navigator.vibrate?.(15);
+  send({ type: "focus_window", address: w.address });
+  makeGhost(w);
+  drawTiles();
+}
+function drop() { lifted = null; drawTiles(); }
+/** Let go without dragging: the action sheet. */
+function openSheet() {
+  lifted.sheet = true;
+  $("ghost").classList.remove("on");
+  $("tile-title").innerHTML = "";
+  const b = document.createElement("b"); b.textContent = lifted.w.title || lifted.w.class;
+  $("tile-title").append(b, document.createTextNode("  " + lifted.w.class));
+  $("tile-float-l").textContent = lifted.w.floating ? "Tile" : "Float";
+  const row = $("tile-ws"); row.innerHTML = "";
+  for (let n = 1; n <= 9; n++) {
+    const btn = document.createElement("button"); btn.textContent = n; btn.dataset.ws = n;
+    if (n === lifted.w.workspace) btn.disabled = true, btn.style.opacity = ".35";
+    btn.onclick = () => { if (!lifted) return; send({ type: "move_window", address: lifted.w.address, workspace: n }); drop(); };
+    row.append(btn);
+  }
+  // A browser window can be handed to an agent (with your sign-ins).
+  const hand = $("tile-hand"); hand.innerHTML = "";
+  if (/chrom|brave|vivaldi|edge/i.test(lifted.w.class) && !/omaspace-agent/.test(lifted.w.class)) {
+    for (const a of state.agents || []) {
+      const btn = document.createElement("button"); btn.className = "wide"; btn.dataset.agent = a.agent;
+      btn.innerHTML = `<span class="i">\u{f06a9}</span>Hand to ${a.agent.replace(/[<&]/g, "")} (workspace ${a.workspace})`;
+      btn.onclick = () => { if (!lifted) return; send({ type: "hand_to_agent", address: lifted.w.address, agent: a.agent }); drop(); };
+      hand.append(btn);
+    }
+  }
+  const sheet = $("tile-sheet"); sheet.classList.add("on");
+  requestAnimationFrame(() => sheet.classList.add("up"));
+  drawTiles();
+}
+const tileAct = (type) => () => { if (!lifted) return; send({ type, address: lifted.w.address }); drop(); };
+$("tile-close").onclick = tileAct("close_window");
+// Pull the sheet down to put the window back.
+(() => {
+  const sheet = $("tile-sheet"); let y0 = null;
+  sheet.addEventListener("touchstart", e => { if (!e.target.closest("button")) y0 = e.touches[0].clientY; }, { passive: true });
+  sheet.addEventListener("touchmove", e => { if (y0 === null) return; const dy = Math.max(0, e.touches[0].clientY - y0); sheet.style.transform = `translateY(${dy}px)`; }, { passive: true });
+  sheet.addEventListener("touchend", e => { if (y0 === null) return; const dy = e.changedTouches[0].clientY - y0; y0 = null; sheet.style.transform = ""; if (dy > 60) drop(); });
+})();
+$("tile-full").onclick = tileAct("fullscreen");
+$("tile-float").onclick = tileAct("toggle_floating");
+$("tile-menu").onclick = () => { if (!lifted) return; const q = streamPos(lifted.at.x, lifted.at.y);
+  send({ type: "pointer", ...q, button: 2, down: true }); send({ type: "pointer", ...q, button: 2, down: false }); drop(); };
+let outputOrigin = { x: 0, y: 0, w: 0 };
+
+// ---- swipe left/right between workspaces (like Omarchy's touchpad swipe) ----
+// A swipe is a deliberate flick: mostly sideways, at least 22% of the screen
+// (or 70px) long, and fast, or else dragged past 40% of the screen. Slow or
+// short drags, and drags that can still pan a zoomed-in stream, stay mouse.
+const SWIPE = { minFrac: 0.22, minPx: 70, minSpeed: 0.3, commitFrac: 0.4, straight: 0.5, lockSpeed: 0.25 };
+function isSwipe(dx, dy, ms) {
+  const W = stageEl.clientWidth, dist = Math.abs(dx);
+  if (Math.abs(dy) > SWIPE.straight * dist) return false;
+  if (dist >= SWIPE.commitFrac * W) return true;
+  return dist >= Math.max(SWIPE.minPx, SWIPE.minFrac * W) && dist / Math.max(ms, 1) >= SWIPE.minSpeed;
+}
+/** Whether the stream is zoomed in and can still pan in the finger's direction. */
+function canPanX(dx) {
+  const w = canvas.width * view.s, W = stageEl.clientWidth;
+  if (w <= W + 1) return false;
+  return dx > 0 ? view.x < -1 : view.x > W - w + 1;
+}
+/** The workspace a swipe goes to: the next or previous of 1–9. */
+function swipeTarget(dir) {
+  const n = (state.active_workspace || 1) + dir;
+  return n >= 1 && n <= 9 ? n : null;
+}
+// No sliding of the picture (it's a live video, and moving it while the new
+// workspace's frames arrive looked broken): a bubble at the edge shows where
+// you'll land, and lights up once letting go would switch.
+function swipePreview(dx) {
+  const dir = dx < 0 ? 1 : -1, target = swipeTarget(dir);
+  const peek = $("swipe-peek");
+  peek.textContent = target ? String(target) : "";
+  peek.className = "on " + (dir > 0 ? "right" : "left") + (isSwipe(dx, 0, 1) ? " ready" : "");
+}
+function swipeEnd(dir) {
+  const target = dir ? swipeTarget(dir) : null;
+  $("swipe-peek").className = "";
+  if (target) { send({ type: "focus_workspace", workspace: target }); navigator.vibrate?.(10); }
+  lastSwipe = { dir, target, at: Date.now() };
+}
+let lastSwipe = null;
+stageEl.addEventListener("touchstart", e => {
+  if (e.target.closest("#zoom, aside, #banner, #files, #agent-bar")) return;
+  if (lifted && !e.touches[1]) { drop(); e.preventDefault(); gesture = null; return; }
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+  const pts = [...touches.values()];
+  if (pts.length === 1) {
+    const p = pts[0];
+    gesture = { kind: "one", sx: p.x, sy: p.y, vx: view.x, vy: view.y, t: performance.now(), moved: false };
+    gesture.hold = setTimeout(() => {
+      if (!gesture || gesture.moved) return;
+      const w = windowAt(p.x, p.y);
+      if (w) { lift(w, p); gesture.lift = true; }
+      else {
+        const q = streamPos(p.x, p.y);
+        send({ type: "pointer", ...q, button: 2, down: true }); send({ type: "pointer", ...q, button: 2, down: false });
+        navigator.vibrate?.(15);
+      }
+      gesture.done = true;
+    }, 450);
+  } else if (pts.length === 2) {
+    clearTimeout(gesture?.hold);
+    const [a, b] = pts, r = stageEl.getBoundingClientRect();
+    gesture = { kind: "two", d: Math.hypot(a.x - b.x, a.y - b.y), s: view.s, cx: (a.x + b.x) / 2 - r.left, cy: (a.y + b.y) / 2 - r.top, vx: view.x, vy: view.y };
+  }
+}, { passive: false });
+stageEl.addEventListener("touchmove", e => {
+  if (!gesture) return;
+  e.preventDefault();
+  for (const t of e.changedTouches) if (touches.has(t.identifier)) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+  const pts = [...touches.values()];
+  if (gesture.lift && lifted && pts.length === 1) {
+    if (!lifted.dragging && Math.hypot(pts[0].x - gesture.sx, pts[0].y - gesture.sy) < 10) return;
+    lifted.dragging = true;
+    moveGhost(pts[0].x, pts[0].y);
+    const w = windowAt(pts[0].x, pts[0].y);
+    const target = w && w.address !== lifted.w.address ? w : null;
+    if (target?.address !== lifted.target?.address) { lifted.target = target; if (target) navigator.vibrate?.(6); drawTiles(); }
+    return;
+  }
+  if (gesture.kind === "one" && pts.length === 1) {
+    const dx = pts[0].x - gesture.sx, dy = pts[0].y - gesture.sy;
+    if (Math.hypot(dx, dy) > 8) { gesture.moved = true; clearTimeout(gesture.hold); }
+    // Decide once, after 24px: clearly sideways, quick (a flick, not a slow
+    // careful drag) and with nothing to pan that way is a workspace swipe;
+    // anything else stays scroll/pan/mouse.
+    if (gesture.moved && !gesture.lock && Math.hypot(dx, dy) > 24) {
+      const speed = Math.abs(dx) / Math.max(1, performance.now() - gesture.t);
+      gesture.lock = Math.abs(dx) > 2 * Math.abs(dy) && speed >= SWIPE.lockSpeed && !canPanX(dx) ? "swipe" : "drag";
+    }
+    if (gesture.lock === "swipe") { gesture.swiped = true; swipePreview(dx); return; }
+    if (gesture.moved) {
+      if (view.fitted) { send({ type: "scroll", dx: 0, dy: -(dy - (gesture.ly || 0)) / 3 }); gesture.ly = dy; }
+      else { view.x = gesture.vx + dx; view.y = gesture.vy + dy; applyView(); }
+    }
+  } else if (gesture.kind === "two" && pts.length === 2) {
+    const [a, b] = pts, r = stageEl.getBoundingClientRect();
+    const cx = (a.x + b.x) / 2 - r.left, cy = (a.y + b.y) / 2 - r.top;
+    const s = Math.min(4, Math.max(fitScale(), gesture.s * Math.hypot(a.x - b.x, a.y - b.y) / gesture.d));
+    const px = (gesture.cx - gesture.vx) / gesture.s, py = (gesture.cy - gesture.vy) / gesture.s;
+    view.s = s; view.x = cx - px * s; view.y = cy - py * s; view.fitted = Math.abs(s - fitScale()) < 1e-3;
+    applyView();
+  }
+}, { passive: false });
+stageEl.addEventListener("touchcancel", () => { touches.clear(); if (gesture?.lock === "swipe") swipeEnd(0); gesture = null; });
+stageEl.addEventListener("touchend", e => {
+  for (const t of e.changedTouches) touches.delete(t.identifier);
+  if (!gesture) return;
+  if (gesture.lift && touches.size === 0) {
+    if (lifted?.target) {
+      // Fly the ghost into the target's slot while Hyprland swaps underneath.
+      settleGhost(tileRect(lifted.target));
+      send({ type: "swap_windows", address: lifted.w.address, with: lifted.target.address });
+      // Hyprland swaps the two slots; mirror it locally right away so the
+      // next long-press hit-tests the new layout, not the old one. The next
+      // state from the machine replaces this with the truth.
+      const A = state.windows.find(w => w.address === lifted.w.address), B = state.windows.find(w => w.address === lifted.target.address);
+      if (A && B) { [A.at, B.at] = [B.at, A.at]; [A.size, B.size] = [B.size, A.size]; }
+      navigator.vibrate?.(10);
+      // End the lift now (the ghost animates on its own), so a touch that
+      // starts during the animation is a new gesture, not "tap to cancel".
+      drop();
+    } else if (lifted?.dragging) { settleGhost(null); drop(); }
+    else if (lifted) openSheet();
+    gesture = null;
+    return;
+  }
+  if (gesture.swiped && touches.size === 0) {
+    const t = e.changedTouches[0], dx = t.clientX - gesture.sx, dy = t.clientY - gesture.sy;
+    swipeEnd(isSwipe(dx, dy, performance.now() - gesture.t) ? (dx < 0 ? 1 : -1) : 0);
+    gesture = null;
+    return;
+  }
+  if (gesture.kind === "one" && !gesture.moved && !gesture.done && touches.size === 0) {
+    clearTimeout(gesture.hold);
+    // Every tap is a click on the machine; two quick taps in the same spot
+    // arrive as a double-click there (select a word, open a file). Zoom is
+    // pinch and the ⤢ button only: a double-tap zoom fired on fast typing
+    // taps and jumped the view.
+    const q = streamPos(gesture.sx, gesture.sy);
+    lastTapPos = q;
+    send({ type: "pointer", ...q }); send({ type: "pointer", ...q, button: 0, down: true }); send({ type: "pointer", ...q, button: 0, down: false });
+    canvas.focus();
+  }
+  if (touches.size === 0) gesture = null;
+}, { passive: false });
+for (const [type, down] of [["keydown", true], ["keyup", false]]) {
+  canvas.addEventListener(type, e => {
+    send({ type: "key", code: e.code, down, sticky: heldMods });
+    if (!down && heldMods) clearMods();
+    e.preventDefault();
+  });
+}
+// Phone keyboard: an off-screen input catches text and sends it as keys.
+const kbd = $("kbd");
+$("kbd-btn").onclick = () => kbd.classList.contains("up") ? kbd.blur() : kbd.focus({ preventScroll: true });
+// The keyboard covers the bottom of the screen. Shrink the page to the space
+// above it and pan the stream so the place you last tapped (where you're
+// typing) stays in view, instead of iOS pushing the page up out of sight.
+// Keyboard up: keep the stream full width (fitting it to the short stage would
+// shrink the text by half) and pan so the tapped point sits a third down.
+function keyboardView() {
+  view.s = Math.max(view.s, stageEl.clientWidth / (canvas.width || 1)); view.fitted = false;
+  const fy = lastTapPos ? lastTapPos.y : 0;
+  view.y = stageEl.clientHeight / 3 - fy * canvas.height * view.s;
+  applyView();
+}
+// Full height without the keyboard, taken whenever the keyboard isn't focused
+// (innerHeight shrinks with the keyboard on some browsers, so don't trust it).
+let fullHeight = window.visualViewport ? visualViewport.height : innerHeight;
+function followKeyboard() {
+  const vv = window.visualViewport;
+  if (document.activeElement !== kbd && vv) fullHeight = vv.height;
+  const up = document.activeElement === kbd && vv && vv.height < fullHeight - 80;
+  document.body.classList.toggle("kbd-up", !!up);
+  kbd.classList.toggle("up", !!up);
+  document.documentElement.style.setProperty("--vvh", vv ? vv.height + "px" : "100dvh");
+  window.scrollTo(0, 0);
+  requestAnimationFrame(() => {
+    if (up) {
+      if (!kbdView) kbdView = { s: view.s, x: view.x, y: view.y, fitted: view.fitted };
+      keyboardView();
+    } else if (kbdView) {
+      Object.assign(view, kbdView); kbdView = null;
+      view.fitted ? fit() : applyView();
+    }
+  });
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener("resize", followKeyboard);
+  visualViewport.addEventListener("scroll", () => { if (document.body.classList.contains("kbd-up")) window.scrollTo(0, 0); });
+}
+kbd.addEventListener("focus", () => setTimeout(followKeyboard, 50));
+kbd.addEventListener("blur", () => setTimeout(followKeyboard, 50));
+// US layout: character → [key code, needs shift].
+const US = {};
+"abcdefghijklmnopqrstuvwxyz".split("").forEach(c => { US[c] = ["Key" + c.toUpperCase(), 0]; US[c.toUpperCase()] = ["Key" + c.toUpperCase(), 1]; });
+"0123456789".split("").forEach(d => US[d] = ["Digit" + d, 0]);
+")!@#$%^&*(".split("").forEach((c, d) => US[c] = ["Digit" + d, 1]);
+Object.assign(US, { " ": ["Space", 0], "\n": ["Enter", 0], "-": ["Minus", 0], "_": ["Minus", 1], "=": ["Equal", 0], "+": ["Equal", 1],
+  "[": ["BracketLeft", 0], "{": ["BracketLeft", 1], "]": ["BracketRight", 0], "}": ["BracketRight", 1], "\\": ["Backslash", 0], "|": ["Backslash", 1],
+  ";": ["Semicolon", 0], ":": ["Semicolon", 1], "'": ["Quote", 0], '"': ["Quote", 1], "`": ["Backquote", 0], "~": ["Backquote", 1],
+  ",": ["Comma", 0], "<": ["Comma", 1], ".": ["Period", 0], ">": ["Period", 1], "/": ["Slash", 0], "?": ["Slash", 1] });
+// The hidden input keeps what's been typed since the keyboard opened, and the
+// remote gets only the difference on each change. Typing appends, so that's
+// one key per character; but the iPhone keyboard's own dictation (and
+// autocorrect) keeps rewriting its draft, and a diff turns each rewrite into
+// a few backspaces plus the new tail instead of typing the draft again.
+let sent = "";
+function syncTyped() {
+  const now = kbd.value.replace(/\r/g, "");
+  let same = 0;
+  while (same < now.length && same < sent.length && now[same] === sent[same]) same++;
+  for (let i = sent.length; i > same; i--) send({ type: "combo", code: "Backspace", mods: 0 });
+  for (const ch of now.slice(same)) { const k = US[ch]; if (k) send({ type: "combo", code: k[0], mods: (k[1] ? 1 : 0) | heldMods }); }
+  sent = now;
+  if (heldMods && now.length > same) clearMods();
+  // Don't let the field grow forever: start over after a pause in typing.
+  clearTimeout(syncTyped.reset);
+  syncTyped.reset = setTimeout(() => { if (!kbd.matches(":focus") || now.length > 200) { kbd.value = ""; sent = ""; } }, 1500);
+}
+kbd.addEventListener("input", syncTyped);
+kbd.addEventListener("blur", () => { kbd.value = ""; sent = ""; });
+kbd.addEventListener("keydown", e => {
+  // Backspace on an empty field (nothing typed this time) still deletes on the remote.
+  if (e.key === "Backspace" && kbd.value) return;
+  if (["Backspace", "Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
+    send({ type: "combo", code: e.key, mods: heldMods }); e.preventDefault(); if (heldMods) clearMods();
+    // A line was sent (or the cursor moved): what's typed next starts fresh.
+    if (e.key !== "Backspace") { kbd.value = ""; sent = ""; }
+  }
+});
+// Sticky modifier buttons: tap SUPER, then a workspace digit, etc.
+function clearMods() { heldMods = 0; document.querySelectorAll("[data-mod]").forEach(b => b.classList.remove("held")); }
+document.querySelectorAll("[data-mod]").forEach(b => b.onclick = () => { heldMods ^= +b.dataset.mod; b.classList.toggle("held"); canvas.focus(); });
+document.querySelectorAll("[data-omarchy]").forEach(b => b.onclick = () => send({ type: "omarchy", what: b.dataset.omarchy }));
+$("windows-btn").onclick = () => $("panel").classList.toggle("on");
+// Phone sheets: tapping the stream behind them, or the grab bar, closes them.
+stageEl.addEventListener("touchstart", e => {
+  if (e.target.closest("aside, #files, #acts")) { if (e.target.closest(".grab")) $("panel").classList.remove("on"); return; }
+  for (const id of ["panel", "files", "acts"]) $(id).classList.remove("on");
+  $("more-btn").classList.remove("on");
+}, { capture: true });
+// Phone: the Omarchy actions sheet. Any action closes it.
+const acts = $("acts");
+$("more-btn").onclick = () => { acts.classList.toggle("on"); $("more-btn").classList.toggle("on", acts.classList.contains("on")); };
+acts.addEventListener("click", e => { if (e.target.closest("button")) { acts.classList.remove("on"); $("more-btn").classList.remove("on"); } });
+
+// ---- files: drag and drop, upload, Downloads list ------------------------------
+const CHUNK = 8 * 1024 * 1024;
+const human = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
+function toast(text, ms = 3000) {
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = text; $("toasts").append(t);
+  if (ms) setTimeout(() => t.remove(), ms);
+  return t;
+}
+async function sha256(file) {
+  const buf = await file.arrayBuffer();
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", buf))].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function upload(file, dir = "~/Downloads") {
+  const path = `${dir}/${file.name}`, t = toast(`↑ ${file.name} 0%`, 0);
+  try {
+    for (let off = 0; off < file.size || off === 0; off += CHUNK) {
+      const r = await fetch(`/v1/files/put?path=${encodeURIComponent(path)}&offset=${off}`, { method: "PUT", body: file.slice(off, off + CHUNK) });
+      if (!r.ok) throw new Error((await r.json()).error);
+      t.textContent = `↑ ${file.name} ${Math.round(Math.min(1, (off + CHUNK) / Math.max(1, file.size)) * 100)}%`;
+      if (file.size === 0) break;
+    }
+    const r = await fetch(`/v1/files/commit?path=${encodeURIComponent(path)}&size=${file.size}&sha256=${await sha256(file)}`, { method: "POST" });
+    const j = await r.json(); if (!r.ok) throw new Error(j.error);
+    t.textContent = `✓ ${j.path}`; setTimeout(() => t.remove(), 3500);
+    if ($("files").classList.contains("on")) listFiles(dir);
+  } catch (e) { t.textContent = `✕ ${file.name}: ${e.message}`; setTimeout(() => t.remove(), 6000); }
+}
+let filesDir = "~/Downloads";
+async function listFiles(dir = filesDir) {
+  const r = await fetch(`/v1/files/list?path=${encodeURIComponent(dir)}`); const j = await r.json();
+  if (!r.ok) { toast("✕ " + j.error); return; }
+  filesDir = j.path; $("files-path").textContent = j.path;
+  const list = $("files-list"); list.innerHTML = "";
+  if (j.path !== "~") {
+    const up = document.createElement("div"); up.className = "row";
+    up.innerHTML = `<a href="#" class="n">↩ ..</a>`; up.querySelector("a").onclick = e => { e.preventDefault(); listFiles(j.path.split("/").slice(0, -1).join("/") || "~"); };
+    list.append(up);
+  }
+  for (const e of j.entries) {
+    if (e.name.startsWith(".") || e.name.endsWith(".omaspace-part")) continue;
+    const row = document.createElement("div"); row.className = "row";
+    const p = `${j.path}/${e.name}`;
+    if (e.dir) { row.innerHTML = `<a href="#" class="n"></a>`; row.querySelector("a").textContent = "📁 " + e.name; row.querySelector("a").onclick = ev => { ev.preventDefault(); listFiles(p); }; }
+    else { row.innerHTML = `<a class="n"></a><span class="s"></span>`; const a = row.querySelector("a"); a.textContent = e.name; a.href = `/v1/files/get?path=${encodeURIComponent(p)}`; a.download = e.name; row.querySelector(".s").textContent = human(e.size); }
+    list.append(row);
+  }
+}
+$("files-btn").onclick = () => { $("files").classList.toggle("on"); if ($("files").classList.contains("on")) listFiles(); };
+$("files-close").onclick = () => $("files").classList.remove("on");
+$("upload-btn").onclick = () => $("file-input").click();
+$("file-input").onchange = async e => { for (const f of e.target.files) await upload(f, filesDir); e.target.value = ""; };
+for (const t of ["dragenter", "dragover"]) stageEl.addEventListener(t, e => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); $("drop").classList.add("on"); } });
+for (const t of ["dragleave", "drop"]) stageEl.addEventListener(t, () => $("drop").classList.remove("on"));
+stageEl.addEventListener("drop", async e => { e.preventDefault(); for (const f of e.dataTransfer.files) await upload(f); });
+$("mode-btn").innerHTML = phoneMode() ? '<span class="i">󰍹</span><span class="lbl">Desktop view</span>' : '<span class="i">󰄜</span><span class="lbl">Phone view</span>';
+$("mode-btn").onclick = () => { params.set("mode", phoneMode() ? "desktop" : "phone"); location.search = params; };
+$("takeover").onclick = () => {
+  const name = $("banner").dataset.agent, a = (state.agents || []).find(x => x.agent === name);
+  if (a) send({ type: "focus_workspace", workspace: a.workspace });
+  send({ type: "take_over" });
+};
+$("dismiss").onclick = () => $("banner").classList.remove("on");
+$("handback").onclick = () => send({ type: "hand_back" });
+
+// ---- arrow pad ------------------------------------------------------------
+// Tap: one arrow toward the side you tapped. Hold and slide: the arrow in
+// the direction you slid repeats while you hold, faster the further you go
+// (like dragging a trackpad cursor through shell history). It only lives on
+// this button, so it never competes with swipes or tile drags on the stream.
+(() => {
+  const pad = $("arrows"), marks = { ArrowUp: ".u", ArrowDown: ".d", ArrowLeft: ".l", ArrowRight: ".r" };
+  let start = null, dir = null, timer = 0, sent = 0;
+  const press = code => { send({ type: "combo", code, mods: heldMods }); sent++; if (heldMods) clearMods(); };
+  const show = code => pad.querySelectorAll(".pad i").forEach(i => i.classList.toggle("on", !!code && i.matches(marks[code])));
+  const dirOf = (dx, dy) => Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "ArrowRight" : "ArrowLeft") : (dy > 0 ? "ArrowDown" : "ArrowUp");
+  function tick() {
+    if (!start || !dir) return;
+    press(dir);
+    // 20px slide: ~4/s; 80px+: ~16/s.
+    const dist = Math.hypot(start.dx, start.dy);
+    timer = setTimeout(tick, Math.max(60, 260 - dist * 2.6));
+  }
+  pad.addEventListener("pointerdown", e => {
+    e.preventDefault(); pad.setPointerCapture(e.pointerId);
+    const r = pad.getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, dx: 0, dy: 0, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+    dir = null; sent = 0; pad.classList.add("active");
+  });
+  pad.addEventListener("pointermove", e => {
+    if (!start) return;
+    start.dx = e.clientX - start.x; start.dy = e.clientY - start.y;
+    if (Math.hypot(start.dx, start.dy) < 14) return;
+    const d = dirOf(start.dx, start.dy);
+    if (d !== dir) { dir = d; show(d); clearTimeout(timer); tick(); }
+  });
+  const end = () => {
+    if (!start) return;
+    clearTimeout(timer);
+    // A tap (no slide): the arrow toward where on the pad you pressed.
+    if (!dir && sent === 0) { const code = dirOf(start.x - start.cx, (start.y - start.cy) * 1.2); show(code); press(code); setTimeout(() => show(null), 120); }
+    else show(null);
+    start = null; dir = null; pad.classList.remove("active");
+  };
+  pad.addEventListener("pointerup", end);
+  pad.addEventListener("pointercancel", end);
+  pad.addEventListener("contextmenu", e => e.preventDefault());
+})();
+
+// ---- machine switcher: every machine on your tailnet with a live view -----
+// Each one is asked who's there (people watching, agents working); tap one to
+// watch it. Machines without a live view (or offline) are greyed out.
+async function openMachines() {
+  const panel = $("machines"), list = $("machines-list");
+  if (panel.classList.toggle("on") === false) return;
+  list.innerHTML = '<div class="d" style="padding:8px">Looking…</div>';
+  let machines = [];
+  try { machines = (await (await fetch("/v1/view/machines")).json()).machines; } catch { }
+  list.innerHTML = "";
+  for (const m of machines) {
+    const b = document.createElement("button");
+    b.className = "m" + (m.here ? " here" : ""); b.dataset.name = m.name;
+    b.innerHTML = `<span class="i" style="font-size:20px">\u{f0379}</span><span><div class="n"></div><div class="d">${m.here ? "watching now" : "checking…"}</div></span><span class="who"></span>`;
+    b.querySelector(".n").textContent = m.name;
+    b.onclick = () => { if (!m.here) location.href = m.url + location.search; else panel.classList.remove("on"); };
+    list.append(b);
+    // Ask the machine itself (its view answers presence for anyone on the tailnet you trust).
+    const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2500);
+    fetch(m.url + "v1/view/presence", { signal: ctl.signal }).then(r => r.json()).then(p => {
+      b.querySelector(".d").textContent = m.here ? "watching now" : "live view";
+      b.querySelector(".who").innerHTML = (p.agents.length ? `<span class="ag">\u{f06a9} ${p.agents.length}</span>` : "") + `<span>\u{f06d0} ${p.watching}</span>`;
+      b.querySelector(".who").title = p.agents.length ? `agents: ${p.agents.join(", ")}` : "";
+      if (p.help) b.querySelector(".d").textContent = "agent needs you: " + p.help;
+    }).catch(() => { if (!m.here) { b.disabled = true; b.querySelector(".d").textContent = "live view not published yet"; } });
+  }
+}
+$("host").onclick = openMachines;
+$("people").onclick = openMachines;
+// Tapping the stream closes the agent sheet too.
+stageEl.addEventListener("touchstart", e => { if (!e.target.closest("#agent-bar")) closeAgentSheet(); }, { capture: true });
+// Tapping the stream closes it, like the other sheets.
+stageEl.addEventListener("touchstart", e => { if (!e.target.closest("#machines")) $("machines").classList.remove("on"); }, { capture: true });
+stageEl.addEventListener("mousedown", e => { if (!e.target.closest("#machines")) $("machines").classList.remove("on"); }, { capture: true });
+
+// ---- hold to talk -------------------------------------------------------------
+// Hold the mic, speak, let go: the clip (16 kHz mono WAV) goes to this
+// machine, Omarchy's dictation (voxtype, local Whisper) turns it into text,
+// and the text is typed into the focused window like the phone keyboard.
+const mic = { stream: null, ctx: null, node: null, chunks: [], rate: 16000, started: 0, raf: 0 };
+const talk = $("talk"), talkTxt = talk.querySelector(".txt"), bars = [...talk.querySelectorAll(".bars i")];
+async function micStart() {
+  if (mic.node) return;
+  try {
+    mic.stream = mic.stream || await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (e) { toast("✕ microphone: " + e.message, 4000); return; }
+  mic.ctx = new AudioContext();
+  const src = mic.ctx.createMediaStreamSource(mic.stream);
+  // ScriptProcessor is old but everywhere (iOS Safari included); 4096 frames.
+  mic.node = mic.ctx.createScriptProcessor(4096, 1, 1);
+  mic.chunks = [];
+  mic.node.onaudioprocess = e => {
+    const data = e.inputBuffer.getChannelData(0);
+    mic.chunks.push(new Float32Array(data));
+    let peak = 0; for (let i = 0; i < data.length; i += 64) peak = Math.max(peak, Math.abs(data[i]));
+    bars.forEach((b, i) => b.style.height = Math.max(4, Math.min(22, peak * 60 * (0.6 + Math.sin(i * 1.7 + performance.now() / 90) * 0.4))) + "px");
+  };
+  src.connect(mic.node); mic.node.connect(mic.ctx.destination);
+  mic.started = performance.now();
+  $("mic-btn").classList.add("rec");
+  talkTxt.textContent = "listening…"; talk.classList.add("on");
+  navigator.vibrate?.(10);
+}
+async function micStop(cancel) {
+  if (!mic.node) return;
+  mic.node.disconnect(); mic.node.onaudioprocess = null; mic.node = null;
+  const rate = mic.ctx.sampleRate; mic.ctx.close(); mic.ctx = null;
+  $("mic-btn").classList.remove("rec");
+  const ms = performance.now() - mic.started;
+  if (cancel || ms < 300) { talk.classList.remove("on"); return; }
+  talkTxt.textContent = "transcribing…"; bars.forEach(b => b.style.height = "4px");
+  $("mic-btn").classList.add("busy");
+  try {
+    const wav = encodeWav(downsample(mic.chunks, rate, 16000), 16000);
+    const r = await fetch("/v1/view/dictate", { method: "POST", headers: { "content-type": "audio/wav" }, body: wav });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    const text = (j.text || "").trim();
+    if (!text) { talkTxt.textContent = "didn't catch that"; setTimeout(() => talk.classList.remove("on"), 1200); return; }
+    talkTxt.textContent = text;
+    typeText(text + " ");
+    setTimeout(() => talk.classList.remove("on"), 1500);
+  } catch (e) {
+    talk.classList.remove("on"); toast("✕ dictation: " + e.message, 5000);
+  } finally { $("mic-btn").classList.remove("busy"); }
+}
+/** Type text into the focused window, as the phone keyboard does. */
+function typeText(text) {
+  for (const ch of text) { const k = US[ch]; if (k) send({ type: "combo", code: k[0], mods: k[1] ? 1 : 0 }); }
+}
+function downsample(chunks, from, to) {
+  const len = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(len);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  if (from === to) return all;
+  const ratio = from / to, out = new Float32Array(Math.floor(len / ratio));
+  // Average each window: a cheap low-pass so 48 kHz → 16 kHz doesn't alias.
+  for (let i = 0; i < out.length; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio));
+    let sum = 0; for (let j = a; j < b; j++) sum += all[j];
+    out[i] = sum / Math.max(1, b - a);
+  }
+  return out;
+}
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 0x7fff, true);
+  return buf;
+}
+const micBtn = $("mic-btn");
+micBtn.addEventListener("pointerdown", e => { e.preventDefault(); micBtn.setPointerCapture(e.pointerId); micStart(); });
+micBtn.addEventListener("pointerup", () => micStop(false));
+micBtn.addEventListener("pointercancel", () => micStop(true));
+micBtn.addEventListener("contextmenu", e => e.preventDefault());
+
+if (!("VideoDecoder" in window)) $("status").textContent = "this browser has no WebCodecs (needs HTTPS and a modern browser)";
+else connect();
+</script>
+</body>
+</html>

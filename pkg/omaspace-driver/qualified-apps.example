@@ -1,0 +1,7 @@
+# ~/.config/cua-driver/qualified-apps
+# Apps agents may type into and click on this Omarchy desktop (through cua's
+# Hyprland plugin). One per line: <package> <version or *> <executable>.
+# Anything not listed is refused (client_not_qualified). Inkscape and
+# LibreOffice are built in. Apps with an accessibility tree (GTK, Qt) can
+# also be driven by their named buttons and fields without being listed.
+foot * /usr/bin/foot

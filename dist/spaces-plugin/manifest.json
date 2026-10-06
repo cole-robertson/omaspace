@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "omaspace.spaces",
+  "name": "Spaces",
+  "version": "0.1.0",
+  "author": "omaspace",
+  "license": "MIT",
+  "description": "Drag a window to the top edge, or press SUPER+CTRL+SHIFT+O, to give it to another of your machines",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Spaces.qml"
+  }
+}
