@@ -77,6 +77,14 @@ pub fn serve() -> anyhow::Result<()> {
     let origin = view_origin(&tailnet::my_dns_name()?);
     let output = primary_output()?;
     remove_stale_phone_screens(&output.0);
+    // A take-over belongs to a viewer, and a restart closes every viewer:
+    // don't leave agents paused by a person who is no longer connected.
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    if crate::agent::taken_over_by(&home).is_some() {
+        let _ = crate::agent::set_taken_over(&home, None);
+    }
     let shared = Arc::new(Shared {
         me,
         origin,
@@ -185,10 +193,10 @@ fn forwarded_ip(headers: &HashMap<String, String>) -> anyhow::Result<&str> {
 }
 
 fn primary_output() -> anyhow::Result<(String, u32, u32)> {
-    let out = std::process::Command::new("hyprctl")
-        .args(["-j", "monitors"])
-        .output()?;
-    let monitors: Value = serde_json::from_slice(&out.stdout)?;
+    let monitors: Value = serde_json::from_str(&hypr::ctl(
+        &["-j", "monitors"],
+        std::time::Duration::from_secs(3),
+    )?)?;
     let m = monitors
         .as_array()
         .and_then(|a| a.first())
@@ -565,7 +573,16 @@ fn handle(mut stream: UnixStream, shared: Arc<Shared>) -> anyhow::Result<()> {
                 stream,
                 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
             )?;
-            let ws = WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Server, None);
+            // A viewer whose link stalls can't buffer without bound: past
+            // 8 MiB of unsent video, sends fail and frames are skipped
+            // until the next keyframe.
+            let mut config = tungstenite::protocol::WebSocketConfig::default();
+            config.max_write_buffer_size = 8 << 20;
+            let ws = WebSocket::from_raw_socket(
+                stream,
+                tungstenite::protocol::Role::Server,
+                Some(config),
+            );
             viewer(ws, shared, who, &path)
         }
         ("POST", "/v1/view/agent") => {
@@ -835,12 +852,7 @@ fn state_for(output: Option<&str>) -> Value {
         .and_then(monitor)
         .and_then(|m| m["activeWorkspace"]["id"].as_i64())
         .unwrap_or_else(|| hypr::active_workspace().unwrap_or(1));
-    let focused = std::process::Command::new("hyprctl")
-        .args(["-j", "activewindow"])
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-        .and_then(|v| v["address"].as_str().map(String::from));
+    let focused = hypr::active_window();
     let mut counts: std::collections::BTreeMap<i64, usize> = (1..=9).map(|i| (i, 0)).collect();
     for c in &clients {
         if c.workspace.id > 0 {
@@ -989,6 +1001,18 @@ fn source_for(shared: &Shared, path: &str, window: Option<&Value>) -> Source {
     }
 }
 
+/// A send or flush on the viewer's non-blocking socket: `Ok(true)` when it's
+/// out, `Ok(false)` when the socket is full (the message stays queued and goes
+/// out on a later flush), an error only when the connection is really gone.
+fn queued(r: Result<(), tungstenite::Error>) -> anyhow::Result<bool> {
+    match r {
+        Ok(()) => Ok(true),
+        Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(tungstenite::Error::WriteBufferFull(_)) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn viewer(
     mut ws: WebSocket<UnixStream>,
     shared: Arc<Shared>,
@@ -1107,7 +1131,13 @@ fn viewer(
                 msg.push(u8::from(frame.key));
                 msg.extend(frame.pts_us.to_be_bytes());
                 msg.extend_from_slice(&frame.data);
-                ws.send(Message::binary(msg))?;
+                // A slow phone link fills the socket: the frame stays queued
+                // in tungstenite and goes out on the next flush. Dropping the
+                // viewer here would cut it off mid-tap.
+                if !queued(ws.send(Message::binary(msg)))? {
+                    waiting_for_key = true;
+                    break;
+                }
                 idle = false;
             }
             for text in out_rx.try_iter() {
@@ -1118,9 +1148,11 @@ fn viewer(
                 } else {
                     text
                 };
-                ws.send(Message::text(text))?;
+                queued(ws.send(Message::text(text)))?;
                 idle = false;
             }
+            // Anything still buffered from a full socket.
+            queued(ws.flush())?;
             match ws.read() {
                 Ok(Message::Text(t)) => {
                     idle = false;
@@ -1150,18 +1182,9 @@ fn viewer(
     end_phone_screen(&shared, id);
     // A take-over ends with the person who took over: the agent must not stay
     // paused for a closed tab. (Takers are tracked by viewer id, not name.)
-    let released = {
-        let mut taker = shared.taken_by.lock().unwrap();
-        if *taker == Some(id) {
-            *taker = None;
-            *shared.taken_over.lock().unwrap() = None;
-            true
-        } else {
-            false
-        }
-    };
-    if released {
-        broadcast(&shared, json!({"type": "control", "taken_over_by": null}));
+    let taker = *shared.taken_by.lock().unwrap();
+    if taker == Some(id) {
+        set_control(&shared, None);
     }
     broadcast_cursors(&shared);
     result
@@ -1179,13 +1202,23 @@ fn send_input_for(shared: &Shared, id: u64, event: Event) {
         .unwrap_or_default();
     let mut inputs = shared.input.lock().unwrap();
     if !inputs.contains_key(&target) {
-        let started = if target.is_empty() {
-            input::start(shared.output.1, shared.output.2, None)
+        // Connecting the virtual devices is a few Wayland round trips. Do it
+        // on its own thread with a deadline: if the compositor is stuck, this
+        // viewer's input is dropped instead of every viewer blocking on it.
+        let (w, h, out) = if target.is_empty() {
+            (shared.output.1, shared.output.2, None)
         } else {
             // Absolute coordinates in a fine grid; the compositor maps them
             // onto the bound output.
-            input::start(10_000, 10_000, Some(&target))
+            (10_000, 10_000, Some(target.clone()))
         };
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(input::start(w, h, out.as_deref()));
+        });
+        let started = done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the compositor didn't answer within 3s")));
         match started {
             Ok(tx) => {
                 inputs.insert(target.clone(), tx);
@@ -1207,11 +1240,7 @@ fn send_input_for(shared: &Shared, id: u64, event: Event) {
 // ---- phone mode: a virtual Hyprland screen shaped like the phone ----------
 
 fn monitor(name: &str) -> Option<Value> {
-    let out = std::process::Command::new("hyprctl")
-        .args(["-j", "monitors", "all"])
-        .output()
-        .ok()?;
-    let list: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let list = hypr::monitors_all().ok()?;
     list.as_array()?.iter().find(|m| m["name"] == name).cloned()
 }
 
@@ -1226,7 +1255,9 @@ fn phone_screen(
     scale: f64,
     workspace: i64,
 ) -> anyhow::Result<Source> {
-    let name = format!("OSP-PHONE-{id}");
+    // Unique across restarts: viewer ids start again at 1, and a name still
+    // held by an old (disabled) output can't be created again.
+    let name = format!("OSP-PHONE-{}-{id}", std::process::id());
     // Hyprland only accepts a scale that divides the mode into whole logical
     // pixels; round the size down to a multiple of the scale's denominator.
     let scale = clean_scale(scale);
@@ -1243,13 +1274,22 @@ fn phone_screen(
         scale
     ));
     if monitor(&name).is_none() {
-        let out = std::process::Command::new("hyprctl")
-            .args(["output", "create", "headless", &name])
-            .output()?;
+        let phones = hypr::monitors_all()?.as_array().map_or(0, |a| {
+            // A disabled one is inert (Hyprland can't remove it until it
+            // restarts): it shows nothing, so it doesn't count.
+            a.iter()
+                .filter(|m| is_phone_screen(&m["name"]) && m["disabled"] != true)
+                .count()
+        });
         anyhow::ensure!(
-            String::from_utf8_lossy(&out.stdout).contains("ok"),
-            "could not create a virtual screen"
+            phones < MAX_PHONE_SCREENS,
+            "{phones} phone screens are already open on this machine; close a phone view first"
         );
+        let out = hypr::ctl(
+            &["output", "create", "headless", &name],
+            std::time::Duration::from_secs(5),
+        )?;
+        anyhow::ensure!(out.contains("ok"), "could not create a virtual screen");
     }
     // Move the workspace: focus it on the primary monitor, then send it over.
     lua_dispatch(&format!(
@@ -1303,37 +1343,91 @@ fn scale_step(s: f64) -> u32 {
     (s * f64::from(q)).round() as u32
 }
 
-/// Give the workspace back to the real monitor and remove the virtual screen.
-/// Phone screens from an earlier run (the view was restarted while a phone was
-/// watching) would keep a workspace off the real monitor: give each one's
-/// workspace back to `primary` and remove it.
+/// At most this many phone screens at once (one per phone watching): each is a
+/// real Hyprland output, and a runaway client must not be able to pile them up.
+const MAX_PHONE_SCREENS: usize = 4;
+
+fn is_phone_screen(name: &Value) -> bool {
+    name.as_str().is_some_and(|n| n.starts_with("OSP-PHONE-"))
+}
+
+/// Remove one phone screen without ever stalling the compositor's caller:
+/// its workspace goes back to `primary` first, then the output is removed,
+/// each step with a deadline. (Don't disable it first: Hyprland can't remove
+/// a disabled headless output, and it would linger.) Returns false if Hyprland
+/// stopped answering, so the caller can stop issuing more removals.
+fn remove_phone_screen(name: &str, workspace: Option<i64>, primary: &str, disabled: bool) -> bool {
+    if let Some(ws) = workspace.filter(|w| *w > 0) {
+        lua_dispatch(&format!(
+            "hl.dsp.focus({{ workspace = {} }})",
+            hypr::lua_string(&ws.to_string())
+        ));
+        lua_dispatch(&format!(
+            "hl.dsp.workspace.move({{ monitor = {} }})",
+            hypr::lua_string(primary)
+        ));
+    }
+    if disabled {
+        // Hyprland can't remove a disabled headless output (it answers
+        // "output not found"); it goes when Hyprland restarts. It shows
+        // nothing and doesn't count toward the limit, so leave it alone.
+        return true;
+    }
+    match hypr::ctl(
+        &["output", "remove", name],
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(out) if out.contains("ok") => true,
+        Ok(out) => {
+            eprintln!("view: removing {name}: {}", out.trim());
+            true
+        }
+        Err(e) => {
+            eprintln!("view: removing {name}: {e}");
+            false
+        }
+    }
+}
+
+/// Phone screens left by an earlier run (the view was restarted while a phone
+/// was watching) keep a workspace off the real monitor. Remove them one at a
+/// time on a background thread, so startup never waits on the compositor,
+/// and stop at the first one Hyprland doesn't answer for.
 fn remove_stale_phone_screens(primary: &str) {
-    let out = std::process::Command::new("hyprctl")
-        .args(["-j", "monitors", "all"])
-        .output();
-    let Ok(list) = out.map(|o| serde_json::from_slice::<Value>(&o.stdout).unwrap_or_default())
-    else {
+    let Ok(list) = hypr::monitors_all() else {
         return;
     };
-    for m in list.as_array().into_iter().flatten() {
-        let Some(name) = m["name"].as_str().filter(|n| n.starts_with("OSP-PHONE-")) else {
-            continue;
-        };
-        if let Some(ws) = m["activeWorkspace"]["id"].as_i64() {
-            lua_dispatch(&format!(
-                "hl.dsp.focus({{ workspace = {} }})",
-                hypr::lua_string(&ws.to_string())
-            ));
-            lua_dispatch(&format!(
-                "hl.dsp.workspace.move({{ monitor = {} }})",
-                hypr::lua_string(primary)
-            ));
-        }
-        let _ = std::process::Command::new("hyprctl")
-            .args(["output", "remove", name])
-            .output();
-        eprintln!("view: removed leftover phone screen {name}");
+    let stale: Vec<(String, Option<i64>, bool)> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| is_phone_screen(&m["name"]))
+        .map(|m| {
+            (
+                m["name"].as_str().unwrap_or("").to_string(),
+                m["activeWorkspace"]["id"].as_i64(),
+                m["disabled"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
     }
+    let primary = primary.to_string();
+    std::thread::spawn(move || {
+        for (name, ws, disabled) in stale {
+            if disabled {
+                // Inert until Hyprland restarts; it can't be removed.
+                continue;
+            }
+            if !remove_phone_screen(&name, ws, &primary, false) {
+                eprintln!("view: Hyprland isn't answering; left the other phone screens in place");
+                return;
+            }
+            eprintln!("view: removed leftover phone screen {name}");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
 }
 
 fn end_phone_screen(shared: &Shared, id: u64) {
@@ -1341,17 +1435,7 @@ fn end_phone_screen(shared: &Shared, id: u64) {
         return;
     };
     shared.input.lock().unwrap().remove(&name);
-    lua_dispatch(&format!(
-        "hl.dsp.focus({{ workspace = {} }})",
-        hypr::lua_string(&workspace.to_string())
-    ));
-    lua_dispatch(&format!(
-        "hl.dsp.workspace.move({{ monitor = {} }})",
-        hypr::lua_string(&shared.output.0)
-    ));
-    let _ = std::process::Command::new("hyprctl")
-        .args(["output", "remove", &name])
-        .output();
+    remove_phone_screen(&name, Some(workspace), &shared.output.0, false);
 }
 
 /// In phone mode, bring workspace `target` onto this viewer's phone screen:
@@ -1393,13 +1477,36 @@ fn phone_swap(shared: &Shared, id: u64, target: i64) -> Option<String> {
 }
 
 fn lua_dispatch_eval(lua: &str) {
-    let _ = std::process::Command::new("hyprctl")
-        .args(["eval", lua])
-        .output();
+    if let Err(e) = hypr::eval(lua) {
+        eprintln!("view: {e}");
+    }
 }
 
 fn lua_dispatch(lua: &str) {
-    let _ = hypr::dispatch(lua);
+    if let Err(e) = hypr::dispatch(lua) {
+        eprintln!("view: {e}");
+    }
+}
+
+/// Take over (`Some((name, viewer id))`) or hand back (`None`): pauses or
+/// resumes the agents reporting here and, through agents.json, every agent's
+/// MCP tools.
+fn set_control(shared: &Shared, by: Option<(&str, u64)>) {
+    *shared.taken_over.lock().unwrap() = by.map(|(n, _)| n.to_string());
+    *shared.taken_by.lock().unwrap() = by.map(|(_, id)| id);
+    if by.is_some() {
+        *shared.help.lock().unwrap() = None;
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    if let Err(e) = crate::agent::set_taken_over(&home, by.map(|(n, _)| n)) {
+        eprintln!("view: recording the take-over for agents: {e}");
+    }
+    broadcast(
+        shared,
+        json!({"type": "control", "taken_over_by": by.map(|(n, _)| n)}),
+    );
 }
 
 fn on_message(shared: &Shared, id: u64, name: &str, msg: &Value) {
@@ -1580,17 +1687,8 @@ fn on_message(shared: &Shared, id: u64, name: &str, msg: &Value) {
             };
             lua_dispatch(&format!("hl.dsp.exec_cmd({})", hypr::lua_string(cmd)));
         }
-        "take_over" => {
-            *shared.taken_over.lock().unwrap() = Some(name.to_string());
-            *shared.taken_by.lock().unwrap() = Some(id);
-            *shared.help.lock().unwrap() = None;
-            broadcast(shared, json!({"type": "control", "taken_over_by": name}));
-        }
-        "hand_back" => {
-            *shared.taken_over.lock().unwrap() = None;
-            *shared.taken_by.lock().unwrap() = None;
-            broadcast(shared, json!({"type": "control", "taken_over_by": null}));
-        }
+        "take_over" => set_control(shared, Some((name, id))),
+        "hand_back" => set_control(shared, None),
         _ => {}
     }
 }

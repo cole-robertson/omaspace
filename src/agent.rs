@@ -52,6 +52,27 @@ pub struct AgentBrowser {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Store {
     spaces: Vec<Space>,
+    /// Someone took over from the live view: agents' actions are refused
+    /// until they hand back. Shared on disk because each agent has its own
+    /// MCP server process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taken_over_by: Option<String>,
+}
+
+/// Pause (`Some(name)`) or resume (`None`) every agent on this machine.
+pub fn set_taken_over(home: &Path, by: Option<&str>) -> anyhow::Result<()> {
+    with_store(home, |store| {
+        store.taken_over_by = by.map(|b| b.chars().take(80).collect());
+        Ok(())
+    })
+}
+
+/// Who has taken over, if anyone (agents are paused meanwhile).
+pub fn taken_over_by(home: &Path) -> Option<String> {
+    std::fs::read(store_path(home))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Store>(&b).ok())
+        .and_then(|s| s.taken_over_by)
 }
 
 fn state_dir(home: &Path) -> PathBuf {
@@ -295,9 +316,7 @@ pub fn ensure_window_rule() {
 
 /// The same rule for another agent window class (terminals).
 pub fn ensure_window_rule_for(class: &str) {
-    let _ = std::process::Command::new("hyprctl")
-        .args(["eval", &window_rule_lua_for(class)])
-        .output();
+    let _ = hypr::eval(&window_rule_lua_for(class));
 }
 
 pub fn window_rule_lua_for(class: &str) -> String {

@@ -157,6 +157,15 @@
   #banner.on { display:flex; }
   #banner button, aside button, #files button { padding:6px 10px; }
   #banner button.primary { border-color:var(--agent); color:var(--agent); }
+  /* While you have control: on the stage, not in the dock, so a phone (whose
+     dock folds the actions away) can always hand back. */
+  #control { touch-action:manipulation; position:absolute; left:8px; right:8px; top:8px; z-index:7; display:none; align-items:center; gap:8px; padding:8px 12px; border-radius:12px;
+    background:color-mix(in srgb, var(--panel) 92%, transparent); border:1px solid var(--agent); backdrop-filter:blur(6px); }
+  #control.on { display:flex; }
+  #control .i { color:var(--agent); }
+  #control-text { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #control button { flex:0 0 auto; padding:6px 10px; }
+  #control button.primary { border-color:var(--agent); color:var(--agent); }
 
   /* Sheets: Windows and Files slide up from the dock on phones, sit at the side on laptops. */
   aside, #files { position:absolute; right:8px; top:8px; bottom:8px; width:min(360px,90vw); background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:auto; display:none; padding:8px; -webkit-user-select:text; user-select:text; }
@@ -222,6 +231,11 @@
     .keys button { min-width:46px; font-size:12px; }
     aside, #files { left:0; right:0; top:auto; bottom:0; width:auto; max-height:70%; border-radius:14px 14px 0 0; border-bottom:0; padding:8px 12px calc(12px + var(--safe-b)); }
     .grab { display:block; }
+    /* The help banner spans the screen, so its message gets the width and
+       doesn't wrap one word per line beside the buttons. */
+    #banner { left:8px; right:8px; transform:none; max-width:none; }
+    #banner-text { flex:1; min-width:0; }
+    #banner button { flex:0 0 auto; }
   }
 </style>
 </head>
@@ -243,6 +257,7 @@
   <div id="machines"><div class="head">Your machines</div><div id="machines-list"></div></div>
   <div id="tile-hint"></div>
   <div id="banner"><span id="banner-text"></span><button class="primary" id="takeover">Take over</button><button id="dismiss">Later</button></div>
+  <div id="control"><span class="i">󰍽</span><span id="control-text"></span><button class="primary" id="handback">Hand back</button></div>
   <aside id="panel"></aside>
   <div id="files"><div class="head"><b id="files-path">~/Downloads</b><span class="spacer"></span><button id="upload-btn">Upload</button><button id="files-close">✕</button></div><div id="files-list"></div></div>
   <div id="drop">Drop to send to this machine's Downloads</div>
@@ -289,7 +304,6 @@
     <button id="windows-btn" title="Windows"><span class="i">󰖯</span><span class="lbl">Windows</span></button>
     <button id="files-btn" title="Files"><span class="i">󰉋</span><span class="lbl">Files</span></button>
     <button id="mode-btn" title="Switch between a phone-shaped screen and the whole desktop"></button>
-    <button id="handback" style="display:none">Hand back to agent</button>
   </div>
   <span id="status">connecting…</span>
   <input id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false">
@@ -325,11 +339,22 @@ function connect() {
   if (params.get("window")) q.set("window", params.get("window"));
   ws = new WebSocket(`wss://${location.host}/ws?${q}`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { $("status").textContent = "live"; setLink("live"); };
+  ws.onopen = () => {
+    $("status").textContent = "live"; setLink("live");
+    for (const m of pending.splice(0)) ws.send(JSON.stringify(m));
+  };
   ws.onclose = () => { $("status").textContent = "reconnecting…"; setLink("down"); resetDecoder(); setTimeout(connect, 1000); };
   ws.onmessage = e => typeof e.data === "string" ? onText(JSON.parse(e.data)) : onFrame(new Uint8Array(e.data));
 }
-const send = m => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
+// While (re)connecting, actions wait and go out once the socket opens, so a
+// tap during a reconnect (a phone reshaping, a network blip) isn't lost.
+// Pointer moves and scrolls are only worth sending live.
+const pending = [];
+const LIVE_ONLY = new Set(["pointer", "scroll", "key", "combo"]);
+const send = m => {
+  if (ws && ws.readyState === 1) return ws.send(JSON.stringify(m));
+  if (!LIVE_ONLY.has(m.type)) { pending.push(m); if (pending.length > 20) pending.shift(); }
+};
 let linkState = "";
 function setLink(st) { linkState = st; const d = document.querySelector("#people .dot"); if (d) d.className = "dot " + st; else $("people").innerHTML = `<span class="dot ${st}"></span>`; }
 
@@ -401,17 +426,30 @@ setInterval(() => {
 function onText(m) {
   if (m.type === "hello") { me = m.id; myName = m.me; stream = m.stream; outputSize = m.output || outputSize; $("host").textContent = location.hostname.split(".")[0]; }
   if (m.type === "state") {
+    // A swap we just sent may not be in this state yet (it was taken before
+    // Hyprland moved the windows): keep showing the swap until it is, or
+    // the next long-press would hit-test the old layout and grab the wrong
+    // window.
+    expectedSwaps = expectedSwaps.filter(x => performance.now() - x.t < 1500);
+    for (const x of expectedSwaps) {
+      const A = m.windows.find(w => w.address === x.a), B = m.windows.find(w => w.address === x.b);
+      if (!A || !B) continue;
+      if (A.at.join() === x.aAt && B.at.join() === x.bAt) x.done = true;
+      else if (A.at.join() === x.bAt && B.at.join() === x.aAt) { [A.at, B.at] = [B.at, A.at]; [A.size, B.size] = [B.size, A.size]; }
+    }
+    expectedSwaps = expectedSwaps.filter(x => !x.done);
     state = m; renderSpaces(); renderPanel();
     if (m.origin) outputOrigin = m.origin;
     // The lifted window may have moved, closed or changed workspace.
-    if (lifted) { const w = state.windows.find(x => x.address === lifted.w.address && x.workspace === state.active_workspace); w ? (lifted.w = w, drawTiles()) : drop(); }
+    if (lifted) { const w = state.windows.find(x => x.address === lifted.w.address); w ? (lifted.w = w, drawTiles()) : drop(); }
   }
   if (m.type === "cursors") renderCursors(m.participants);
   if (m.type === "toast") toast(m.text, 4000);
   if (m.type === "help") { $("banner-text").textContent = "🤖 " + m.message; $("banner").classList.add("on"); }
   if (m.type === "control") {
     takenOverBy = m.taken_over_by;
-    $("handback").style.display = takenOverBy ? "" : "none";
+    $("control").classList.toggle("on", !!takenOverBy);
+    $("control-text").textContent = !takenOverBy ? "" : takenOverBy === myName ? "You're in control, agent paused" : `${takenOverBy} is in control, agent paused`;
     if (takenOverBy) $("banner").classList.remove("on");
   }
 }
@@ -431,6 +469,7 @@ function renderSpaces() {
     $("spaces").append(b);
   }
   renderAgentBar();
+  renderHelp();
 }
 /** On an agent's workspace: a bar with its name, task and status. */
 function renderAgentBar() {
@@ -440,8 +479,14 @@ function renderAgentBar() {
   bar.querySelector(".n").textContent = a.agent;
   bar.querySelector(".s").textContent = a.help ? "needs you: " + a.help : (a.status || a.task || "working");
   bar.onclick = () => openAgentSheet(a.agent);
-  // Waiting for you: the banner, once per request.
-  if (a.help && a.help !== shownHelp[a.agent]) { shownHelp[a.agent] = a.help; showHelp(a); }
+}
+/** An agent waiting for you gets the banner (with Take over) wherever you
+ *  are watching, once per request, not only on its own workspace. */
+function renderHelp() {
+  for (const a of state.agents || []) {
+    if (a.help && a.help !== shownHelp[a.agent]) { shownHelp[a.agent] = a.help; if (!takenOverBy) showHelp(a); }
+    if (!a.help) delete shownHelp[a.agent];
+  }
 }
 const shownHelp = {};
 function showHelp(a) {
@@ -627,11 +672,11 @@ const pos = e => streamPos(e.clientX, e.clientY);
 // Mouse / pen: direct pointer (desktop browsers).
 stageEl.addEventListener("pointermove", e => { if (e.pointerType !== "touch") send({ type: "pointer", ...pos(e) }); });
 stageEl.addEventListener("pointerdown", e => {
-  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #files")) return;
+  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #control, #files")) return;
   canvas.focus(); stageEl.setPointerCapture(e.pointerId);
   send({ type: "pointer", ...pos(e), button: e.button, down: true }); e.preventDefault();
 });
-stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #files")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
+stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #control, #files")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
 stageEl.addEventListener("contextmenu", e => e.preventDefault());
 stageEl.addEventListener("wheel", e => {
   e.preventDefault();
@@ -649,6 +694,7 @@ let gesture = null, lastTapPos = null, kbdView = null;
 // Window geometry comes from Hyprland state (stream pixels), so the outline is
 // exactly the tile, and the swap is Hyprland's own (hl.dsp.window.swap).
 let lifted = null; // { w, target }
+let expectedSwaps = []; // swaps sent but not yet in a state from the machine
 /** Windows you can touch on the workspace in view. A fullscreen window
  *  covers everything: it's the only one (nothing behind it can be lifted or
  *  swapped with). Otherwise floating windows first, then most recently
@@ -727,6 +773,7 @@ function drop() { lifted = null; drawTiles(); }
 /** Let go without dragging: the action sheet. */
 function openSheet() {
   lifted.sheet = true;
+  const addr = lifted.w.address, wsNow = lifted.w.workspace;
   $("ghost").classList.remove("on");
   $("tile-title").innerHTML = "";
   const b = document.createElement("b"); b.textContent = lifted.w.title || lifted.w.class;
@@ -735,8 +782,8 @@ function openSheet() {
   const row = $("tile-ws"); row.innerHTML = "";
   for (let n = 1; n <= 9; n++) {
     const btn = document.createElement("button"); btn.textContent = n; btn.dataset.ws = n;
-    if (n === lifted.w.workspace) btn.disabled = true, btn.style.opacity = ".35";
-    btn.onclick = () => { if (!lifted) return; send({ type: "move_window", address: lifted.w.address, workspace: n }); drop(); };
+    if (n === wsNow) btn.disabled = true, btn.style.opacity = ".35";
+    btn.onclick = () => { send({ type: "move_window", address: addr, workspace: n }); closeTileSheet(); };
     row.append(btn);
   }
   // A browser window can be handed to an agent (with your sign-ins).
@@ -745,15 +792,18 @@ function openSheet() {
     for (const a of state.agents || []) {
       const btn = document.createElement("button"); btn.className = "wide"; btn.dataset.agent = a.agent;
       btn.innerHTML = `<span class="i">\u{f06a9}</span>Hand to ${a.agent.replace(/[<&]/g, "")} (workspace ${a.workspace})`;
-      btn.onclick = () => { if (!lifted) return; send({ type: "hand_to_agent", address: lifted.w.address, agent: a.agent }); drop(); };
+      btn.onclick = () => { send({ type: "hand_to_agent", address: addr, agent: a.agent }); closeTileSheet(); };
       hand.append(btn);
     }
   }
-  const sheet = $("tile-sheet"); sheet.classList.add("on");
+  const sheet = $("tile-sheet"); sheet.classList.add("on"); sheet.dataset.address = addr;
   requestAnimationFrame(() => sheet.classList.add("up"));
   drawTiles();
 }
-const tileAct = (type) => () => { if (!lifted) return; send({ type, address: lifted.w.address }); drop(); };
+/** The window the open sheet is about (it outlives a dropped lift). */
+const sheetAddress = () => lifted?.w.address || $("tile-sheet").dataset.address;
+function closeTileSheet() { delete $("tile-sheet").dataset.address; drop(); }
+const tileAct = (type) => () => { const a = sheetAddress(); if (!a) return; send({ type, address: a }); closeTileSheet(); };
 $("tile-close").onclick = tileAct("close_window");
 // Pull the sheet down to put the window back.
 (() => {
@@ -807,7 +857,7 @@ function swipeEnd(dir) {
 }
 let lastSwipe = null;
 stageEl.addEventListener("touchstart", e => {
-  if (e.target.closest("#zoom, aside, #banner, #files, #agent-bar")) return;
+  if (e.target.closest("#zoom, aside, #banner, #control, #files, #agent-bar")) return;
   if (lifted && !e.touches[1]) { drop(); e.preventDefault(); gesture = null; return; }
   e.preventDefault();
   for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
@@ -883,7 +933,11 @@ stageEl.addEventListener("touchend", e => {
       // next long-press hit-tests the new layout, not the old one. The next
       // state from the machine replaces this with the truth.
       const A = state.windows.find(w => w.address === lifted.w.address), B = state.windows.find(w => w.address === lifted.target.address);
-      if (A && B) { [A.at, B.at] = [B.at, A.at]; [A.size, B.size] = [B.size, A.size]; }
+      if (A && B) {
+        [A.at, B.at] = [B.at, A.at]; [A.size, B.size] = [B.size, A.size];
+        // Where each should end up, to recognise the state that has the swap.
+        expectedSwaps.push({ a: A.address, b: B.address, aAt: A.at.join(), bAt: B.at.join(), t: performance.now() });
+      }
       navigator.vibrate?.(10);
       // End the lift now (the ghost animates on its own), so a touch that
       // starts during the animation is a new gesture, not "tap to cancel".
@@ -1072,8 +1126,11 @@ $("mode-btn").innerHTML = phoneMode() ? '<span class="i">󰍹</span><span class=
 $("mode-btn").onclick = () => { params.set("mode", phoneMode() ? "desktop" : "phone"); location.search = params; };
 $("takeover").onclick = () => {
   const name = $("banner").dataset.agent, a = (state.agents || []).find(x => x.agent === name);
-  if (a) send({ type: "focus_workspace", workspace: a.workspace });
+  // Take control first: going to the agent's workspace can reshape a phone's
+  // screen and reconnect, and the take-over must not ride behind that.
   send({ type: "take_over" });
+  $("banner").classList.remove("on");
+  if (a && a.workspace !== state.active_workspace) send({ type: "focus_workspace", workspace: a.workspace });
 };
 $("dismiss").onclick = () => $("banner").classList.remove("on");
 $("handback").onclick = () => send({ type: "hand_back" });

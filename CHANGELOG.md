@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.1 - 2026-10-06
+
+- **Take over works on phones.** Hand back was in the phone's folded-away
+  actions, so after taking over there was no way to resume the agent. While
+  someone has control, a bar at the top of the screen says so and has
+  **Hand back**, on every screen size.
+- **Take over pauses agents for real.** It now pauses every agent's MCP tools
+  on that machine, not only agents reporting a cursor: actions are refused
+  with a message to wait, while reading, status and asking for help still
+  work. `get_space` shows who has taken over. Closing the view, or restarting
+  it, hands back.
+- **An agent's call for help reaches you on any workspace,** not only when
+  you're watching the agent's own workspace.
+- **The live view can't stall the desktop or itself on Hyprland.** Every
+  `hyprctl` call has a deadline, and after one times out the view stops
+  sending more until Hyprland answers again. Leftover phone screens are
+  removed one at a time in the background at startup, at most four phone
+  screens can exist at once, and their names are unique per run. Connecting
+  input to a stuck compositor gives up instead of blocking every viewer. A
+  slow phone link is backpressure, not a disconnect, and its buffer is capped.
+- **Taps during a reconnect aren't lost:** actions wait and go out when the
+  connection is back. Window actions from a tile's sheet act on that window
+  even if the layout changed meanwhile, and quick swaps in a row swap the
+  windows you dragged.
+- Dead recorder processes are reaped; an agent's desktop-app session that the
+  driver ended is started again.
+
 ## 0.1.0 - 2026-10-06
 
 First public release.

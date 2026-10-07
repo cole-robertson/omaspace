@@ -218,6 +218,18 @@ fn driver_call(tool: &str, args: &Value) -> anyhow::Result<Value> {
 }
 
 fn driver_call_in(session: Option<&str>, tool: &str, args: &Value) -> anyhow::Result<Value> {
+    match driver_call_once(session, tool, args) {
+        // The driver ended this session (an agent released its space, then
+        // came back under the same name): start it again and retry once.
+        Err(e) if session.is_some() && e.to_string().contains("session has ended") => {
+            driver_call_once(None, "start_session", &json!({"session": session}))?;
+            driver_call_once(session, tool, args)
+        }
+        r => r,
+    }
+}
+
+fn driver_call_once(session: Option<&str>, tool: &str, args: &Value) -> anyhow::Result<Value> {
     let mut args = args.clone();
     if let Some(s) = session {
         args["session"] = json!(s);

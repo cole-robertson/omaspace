@@ -161,7 +161,12 @@ impl Capture {
                     };
                     let mut child = capture.child.lock().unwrap();
                     if attempt > 0 {
-                        if capture.subscribers.lock().unwrap().is_empty() || attempt > 20 {
+                        // Reap the recorder whose output just ended, so it
+                        // doesn't linger as a zombie process.
+                        let _ = child.wait();
+                        // Its output may be gone (a phone screen removed);
+                        // a few quick retries, not twenty.
+                        if capture.subscribers.lock().unwrap().is_empty() || attempt > 5 {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(400));

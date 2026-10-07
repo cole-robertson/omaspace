@@ -5,7 +5,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 
-const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(ls -t /run/user/$(id -u)/hypr/ | head -1) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && echo ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
+const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(for s in $(ls -t /run/user/$(id -u)/hypr/); do HYPRLAND_INSTANCE_SIGNATURE=$s timeout 2 hyprctl -j version >/dev/null 2>&1 && { echo $s; break; }; done) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && echo ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
 
 export class Machine {
   /** @param {string} name tailnet hostname, e.g. "peer" */
@@ -47,7 +47,9 @@ export class Machine {
   // ---- Hyprland --------------------------------------------------------------
 
   clients() { return this.json("hyprctl -j clients"); }
-  monitors() { return this.json("hyprctl -j monitors all"); }
+  /** Every monitor that's on, phone screens included. Disabled ones are
+   *  leftovers Hyprland can't remove until it restarts: ignored. */
+  monitors() { return this.json("hyprctl -j monitors all").filter(m => !m.disabled); }
   activeWorkspace() { return this.json("hyprctl -j activeworkspace").id; }
   windowsOn(ws) { return this.clients().filter(c => c.workspace.id === ws); }
   dispatch(lua) { return this.sh(`hyprctl dispatch ${shq(lua)}`); }

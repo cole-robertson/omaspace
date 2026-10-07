@@ -1,6 +1,9 @@
 // The live view: laptop and phone, controls, phone mode, files, agents.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 
 const WS = 7;
 
@@ -77,42 +80,52 @@ test("window panel: float and move a window to another workspace", async ({ desk
   await waitFor(() => desk.clients().find(c => c.address === win.address)?.workspace.id === 9, "window on ws9");
 });
 
-test("files: phone upload, listing, download, and desktop drag and drop", async ({ desk, peer, phone, laptop }, info) => {
+test("files: phone upload, listing, download, and desktop drag and drop", async ({ desk, phone, laptop }, info) => {
+  // The test browsers run here, so the file to upload is made here.
   const local = info.outputPath("photo.jpg");
-  peer.randomFile(local, 6_000_000);
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.writeFileSync(local, crypto.randomBytes(6_000_000));
+  const sha = f => crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
   desk.onCleanup(() => desk.rm("$HOME/Downloads/photo.jpg"));
   desk.onCleanup(() => desk.rm("$HOME/Downloads/dropped.txt"));
 
   const p = await phone.open(desk, { mode: "desktop" });
   await p.openFiles();
   expect((await p.upload([local]))[0]).toMatch(/^✓ ~\/Downloads\/photo\.jpg/);
-  expect(desk.sha256("$HOME/Downloads/photo.jpg")).toBe(peer.sha256(local));
+  expect(desk.sha256("$HOME/Downloads/photo.jpg")).toBe(sha(local));
   await waitFor(async () => (await p.fileNames()).includes("photo.jpg"), "photo listed");
   const saved = await p.download("photo.jpg", info.outputPath("back.jpg"));
-  expect(peer.sha256(saved)).toBe(peer.sha256(local));
+  expect(sha(saved)).toBe(sha(local));
 
   const l = await laptop.open(desk);
   expect((await l.drop([{ name: "dropped.txt", content: "from a laptop\n" }]))[0]).toMatch(/^✓/);
   expect(desk.read("$HOME/Downloads/dropped.txt")).toBe("from a laptop");
 });
 
-test("agent: cursor, help request, take over pauses the agent, hand back resumes it", async ({ desk, laptop }) => {
-  const view = await laptop.open(desk);
-  const agent = body => fetch(`${desk.viewUrl()}/v1/view/agent`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
+for (const device of ["laptop", "phone"]) {
+  test(`agent (${device}): cursor, help request, take over pauses the agent, hand back resumes it`, async ({ desk, laptop, phone }) => {
+    const view = await (device === "phone" ? phone.open(desk, {}) : laptop.open(desk));
+    const tap = loc => (device === "phone" ? loc.tap() : loc.click());
+    const agent = body => fetch(`${desk.viewUrl()}/v1/view/agent`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
+    desk.onCleanup(() => desk.sh("omarchy-shell -q notifications dismissAll", { check: false }));
+    desk.onCleanup(() => view.page.evaluate(() => send({ type: "hand_back" })).catch(() => {}));
 
-  expect(await agent({ name: "TestAgent", x: 0.4, y: 0.3 })).toEqual({ ok: true });
-  await expect(view.page.locator(".cursor.agent", { hasText: "TestAgent" })).toBeVisible();
-  await agent({ name: "TestAgent", help: "need a 2FA code" });
-  await expect(view.page.locator("#banner.on")).toContainText("need a 2FA code");
-  await view.page.click("#takeover");
-  // The take-over goes over the websocket; wait for the server's broadcast.
-  await expect(view.page.locator("#handback")).toBeVisible();
-  expect(await agent({ name: "TestAgent", x: 0.5, y: 0.5 })).toMatchObject({ ok: false, paused: true });
-  desk.onCleanup(() => desk.sh("omarchy-shell -q notifications dismissAll", { check: false }));
-  await view.page.click("#handback");
-  await expect(view.page.locator("#handback")).toBeHidden();
-  expect(await agent({ name: "TestAgent", x: 0.5, y: 0.5 })).toEqual({ ok: true });
-});
+    expect(await agent({ name: "TestAgent", x: 0.4, y: 0.3 })).toEqual({ ok: true });
+    await expect(view.page.locator(".cursor.agent", { hasText: "TestAgent" })).toBeVisible();
+    await agent({ name: "TestAgent", help: "need a 2FA code" });
+    await expect(view.page.locator("#banner.on")).toContainText("need a 2FA code");
+    await tap(view.page.locator("#takeover"));
+    // The take-over goes over the websocket; wait for the server's broadcast.
+    // Hand back must be on screen and tappable, not folded away in the dock.
+    const handback = view.page.locator("#handback");
+    await expect(handback).toBeVisible();
+    await expect(view.page.locator("#control")).toContainText("You're in control");
+    expect(await agent({ name: "TestAgent", x: 0.5, y: 0.5 })).toMatchObject({ ok: false, paused: true });
+    await tap(handback);
+    await expect(handback).toBeHidden();
+    expect(await agent({ name: "TestAgent", x: 0.5, y: 0.5 })).toEqual({ ok: true });
+  });
+}
 
 test("security: the view refuses connections that don't come through Tailscale", async ({ desk }) => {
   // No TCP listener at all: other users on the machine have nothing to forge headers to.

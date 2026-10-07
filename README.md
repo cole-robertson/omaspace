@@ -15,10 +15,22 @@ and give AI agents a workspace of their own next to yours.
   dictation.
 - **Agent spaces.** An MCP server gives agents their own Omarchy workspace,
   with a browser signed in as you, a terminal and desktop apps, that never
-  takes your focus or pointer. You can watch them from your phone, answer
-  when they ask for help, and hand a browser over or take it back.
+  takes your focus or pointer. You can watch them from your phone, and hand
+  a browser over or take it back. When an agent asks for help (a 2FA code, a
+  decision), your phone shows it: **Take over** pauses every agent on that
+  machine while you do it, and **Hand back** lets them carry on. Closing the
+  view hands back too, so an agent is never left paused by a phone you put
+  away.
 - **Files.** Copy files and folders between machines, or keep a folder in sync
   both ways.
+
+![The live view in a laptop's browser](docs/screenshots/laptop.webp)
+
+<p align="center">
+  <img src="docs/screenshots/phone-help.webp" alt="On a phone: an agent asks which time works, with Take over and Later" width="300">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/phone-control.webp" alt="After Take over: you're in control and the agent is paused, with Hand back" width="300">
+</p>
 
 It works only between your own devices: every request is identified with
 Tailscale and refused unless it comes from your own account. Nothing goes

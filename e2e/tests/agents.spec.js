@@ -39,13 +39,48 @@ test("the agent's browser is signed in as the user (their cookies came along)", 
   desk.onCleanup(() => desk.dispatch(`hl.dsp.window.close({ window = "address:${mine.address}" })`));
   desk.mcp("claim_space", { agent: AGENT, task: "set a cookie as the user" });
   desk.mcp("open_browser", { agent: AGENT, signed_in: false, urls: ["https://example.org/"] });
+  desk.mcp("browser_navigate", { agent: AGENT, url: "https://example.org/" }); // waits for the page
   desk.mcp("browser_eval", { agent: AGENT, expression: `document.cookie = "${marker}=yes; path=/; max-age=3600"` });
   desk.mcp("take_browser_back", { agent: AGENT });
   const inUserProfile = () => desk.sh(`cp ~/.config/chromium/Default/Cookies /tmp/osp-ck.db && sqlite3 /tmp/osp-ck.db "select count(*) from cookies where name='${marker}'"; rm -f /tmp/osp-ck.db`);
   await waitFor(() => inUserProfile() === "1", "the user's browser has the sign-in cookie", 20_000);
   // A fresh agent browser seeded from the user's profile has it too.
   desk.mcp("open_browser", { agent: AGENT, urls: ["https://example.org/"] });
+  desk.mcp("browser_navigate", { agent: AGENT, url: "https://example.org/" });
   expect(desk.mcp("browser_cookies", { agent: AGENT })).toContain(marker);
+});
+
+test("phone: the agent asks for help, you take over (it's paused), then hand it back", async ({ desk, phone }) => {
+  desk.mcp("claim_space", { agent: AGENT, task: "sign in to the bank" });
+  desk.mcp("open_browser", { agent: AGENT, signed_in: false, urls: ["https://example.org/"] });
+  desk.onCleanup(() => desk.sh("omarchy-shell -q notifications dismissAll", { check: false }));
+  const view = await phone.open(desk, { workspace: String(ME) });
+  desk.onCleanup(() => view.page.evaluate(() => send({ type: "hand_back" })).catch(() => {}));
+  desk.mcp("ask_for_help", { agent: AGENT, message: "enter the 2FA code" });
+  const banner = view.page.locator("#banner.on");
+  await expect(banner).toContainText("enter the 2FA code");
+  await view.page.locator("#takeover").tap();
+  // You're in control: the bar says so and the agent's actions are refused.
+  await expect(view.page.locator("#control")).toContainText("You're in control");
+  expect(() => desk.mcp("browser_navigate", { agent: AGENT, url: "https://example.com/" })).toThrow(/taken over/);
+  expect(desk.mcp("get_space", { agent: AGENT }).taken_over_by).toBe("Phone");
+  // Reading still works, so the agent can wait and watch.
+  expect(desk.mcp("browser_tabs", { agent: AGENT }).length).toBeGreaterThan(0);
+  // Hand back from the phone: the agent carries on.
+  await view.page.locator("#handback").tap();
+  await expect(view.page.locator("#control")).toBeHidden();
+  await waitFor(() => desk.mcp("get_space", { agent: AGENT }).taken_over_by === null, "agent resumed");
+  desk.mcp("browser_navigate", { agent: AGENT, url: "https://example.org/" });
+});
+
+test("closing the phone that took over resumes the agent", async ({ desk, phone }) => {
+  desk.mcp("claim_space", { agent: AGENT, task: "wait for you" });
+  const view = await phone.open(desk, { workspace: String(ME) });
+  await view.page.evaluate(() => send({ type: "take_over" }));
+  await expect(view.page.locator("#control")).toBeVisible();
+  expect(desk.mcp("get_space", { agent: AGENT }).taken_over_by).toBe("Phone");
+  await view.page.close();
+  await waitFor(() => desk.mcp("get_space", { agent: AGENT }).taken_over_by === null, "agent resumed when the phone left");
 });
 
 test("the phone sees the agent's workspace, its status, and its call for help", async ({ desk, phone }) => {

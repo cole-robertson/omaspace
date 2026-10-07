@@ -32,6 +32,10 @@ input, so it only talks to your own devices. [SPEC.md](SPEC.md) has the details;
 - **Agent browsers' DevTools stay private.** An agent's browser holds a copy of your sign-ins.
   Its DevTools runs over a pipe relayed on a 0600 unix socket, never a TCP port that other local
   users could connect to.
+- **It can't hang your desktop.** Every call to Hyprland has a deadline, and the live view
+  backs off when Hyprland doesn't answer instead of queueing more work on it. At most four
+  phone-shaped virtual screens can exist, and leftovers are cleaned up one at a time in the
+  background.
 - **Sign-ins are opt-in.** Cookies, saved passwords and history stay behind unless you allow
   them for a transfer.
 - **Restores never run a shell string.** A snapshot can only reopen windows through fixed

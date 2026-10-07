@@ -123,6 +123,29 @@ fn call(name: &str, args: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// Tools that change something on the desktop: refused while a person has
+/// taken over. Reading, status, help and releasing the space stay allowed, so
+/// an agent can wait politely and still hand its work back.
+fn acts_on_desktop(tool: &str) -> bool {
+    !matches!(
+        tool,
+        "claim_space"
+            | "set_status"
+            | "ask_for_help"
+            | "get_space"
+            | "list_spaces"
+            | "release_space"
+            | "take_browser_back"
+            | "browser_tabs"
+            | "browser_read"
+            | "browser_screenshot"
+            | "browser_cookies"
+            | "terminal_read"
+            | "app_windows"
+            | "app_read"
+    )
+}
+
 fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Result<Value> {
     if name == "list_spaces" {
         return Ok(json!(agent::list(home)));
@@ -135,6 +158,11 @@ fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Resul
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("{k} is required"))
     };
+    if let Some(by) = agent::taken_over_by(home).filter(|_| acts_on_desktop(name)) {
+        anyhow::bail!(
+            "{by} has taken over: you're paused. Don't act until they hand back; poll get_space (it shows taken_over_by) and continue when it's gone."
+        );
+    }
     let term = || args["name"].as_str().unwrap_or("main");
     let strings = |k: &str| -> Vec<String> {
         args[k]
@@ -171,7 +199,11 @@ fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Resul
                 .status();
             json!(s)
         }
-        "get_space" => json!(agent::space_of(home, who)?),
+        "get_space" => {
+            let mut v = json!(agent::space_of(home, who)?);
+            v["taken_over_by"] = json!(agent::taken_over_by(home));
+            v
+        }
         "list_spaces" => json!(agent::list(home)),
         "release_space" => {
             agent::release(home, who)?;
