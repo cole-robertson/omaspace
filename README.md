@@ -46,9 +46,9 @@ You need Omarchy and Tailscale. Download the latest
 (x86_64 Linux):
 
 ```sh
-curl -LO https://github.com/cole-robertson/omaspace/releases/latest/download/omaspace-0.1.1-x86_64-linux.tar.gz
-tar xzf omaspace-0.1.1-x86_64-linux.tar.gz
-install -m755 omaspace-0.1.1-x86_64-linux/omaspace ~/.local/bin/
+curl -LO https://github.com/cole-robertson/omaspace/releases/latest/download/omaspace-0.1.2-x86_64-linux.tar.gz
+tar xzf omaspace-0.1.2-x86_64-linux.tar.gz
+install -m755 omaspace-0.1.2-x86_64-linux/omaspace ~/.local/bin/
 omaspace setup
 ```
 

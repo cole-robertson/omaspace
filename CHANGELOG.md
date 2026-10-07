@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 - 2026-10-06
+
+- **Swapping tiles on a phone lands cleanly.** When you let go, the window
+  you dragged glides into its new slot and stays there until the live video
+  shows the swap finished, then fades. Before, it faded on a fixed timer
+  while Hyprland was still sliding the windows, so for a moment you saw them
+  half-moved or back in their old places.
+
 ## 0.1.1 - 2026-10-06
 
 - **Take over works on phones.** Hand back was in the phone's folded-away

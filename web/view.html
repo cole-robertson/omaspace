@@ -74,7 +74,7 @@
     box-shadow:0 18px 50px rgba(0,0,0,.6); transform-origin:center; will-change:transform; }
   #ghost.on { display:block; }
   #ghost canvas { display:block; width:100%; height:100%; }
-  #ghost.settle { transition:transform .18s ease-out, opacity .18s ease-out; }
+  #ghost.settle { transition:transform .18s ease-out, opacity .14s ease-out; }
   #tile-sheet { position:fixed; left:0; right:0; bottom:0; z-index:20; display:none; background:var(--panel); border-top:1px solid var(--line);
     border-radius:16px 16px 0 0; padding:8px 12px calc(14px + var(--safe-b)); box-shadow:0 -10px 40px rgba(0,0,0,.5); transform:translateY(100%); transition:transform .18s ease-out; }
   #tile-sheet.on { display:block; }
@@ -388,6 +388,7 @@ function onFrame(buf) {
           phoneMode() ? fit() : small ? readableOn(focusedRect()) : fit();
         }
         ctx.drawImage(f, 0, 0); f.close();
+        checkGhost();
       },
       error: e => { $("status").textContent = "decoder: " + e.message; resetDecoder(); },
     });
@@ -735,7 +736,10 @@ function drawTiles() {
 }
 /** A snapshot of the lifted window from the current video frame. */
 function makeGhost(w) {
+  // A new lift takes the ghost over from one still settling.
+  ghostWait = null; ghostGen++;
   const t = tileRect(w), g = $("ghost"), c = g.querySelector("canvas");
+  delete g.dataset.settling;
   const k = canvas.width / (outputOrigin.w || canvas.width);
   const sx = (w.at[0] - outputOrigin.x) * k, sy = (w.at[1] - outputOrigin.y) * k, sw = w.size[0] * k, sh = w.size[1] * k;
   c.width = Math.max(1, Math.round(Math.min(sw, 900))); c.height = Math.max(1, Math.round(c.width * sh / sw));
@@ -752,15 +756,69 @@ function moveGhost(px, py) {
   g.style.transform = `translate(${dx}px, ${dy}px) scale(${s})`;
 }
 /** Animate the ghost into a rect (or back home), then hide it. */
+/** Let go: the ghost glides into its slot (`to`, or back where it came from)
+ *  and stays there, solid, until the video under it has changed and then
+ *  settled (Hyprland animates the two windows trading places), then fades.
+ *  Fading on a timer instead showed the old picture, or the windows halfway
+ *  through their move, so the window seemed to jump back. */
 function settleGhost(to) {
   const g = $("ghost"), t = lifted.ghost.t;
   g.dataset.settling = "1";
   g.classList.add("settle");
   const dest = to || t;
-  const s = dest.w / t.w;
-  g.style.transform = `translate(${dest.x + dest.w / 2 - (t.x + t.w / 2)}px, ${dest.y + dest.h / 2 - (t.y + t.h / 2)}px) scale(${s}, ${dest.h / t.h})`;
-  g.style.opacity = "0.15";
-  setTimeout(() => { g.classList.remove("on", "settle"); g.style.transform = ""; delete g.dataset.settling; }, 190);
+  g.style.transform = `translate(${dest.x + dest.w / 2 - (t.x + t.w / 2)}px, ${dest.y + dest.h / 2 - (t.y + t.h / 2)}px) scale(${dest.w / t.w}, ${dest.h / t.h})`;
+  g.style.opacity = "1";
+  const settled = performance.now() + 180;
+  // Back to its own slot: the picture under it is already right.
+  const watch = to ? regionPrint(dest) : null;
+  ghostWait = { watch, dest, settled, changed: false, last: watch, still: 0, until: performance.now() + 900 };
+  const gen = ghostGen;
+  // Back home: nothing to wait for. A swap: at most 900 ms, if the video is
+  // slow or the picture there doesn't change (two identical windows).
+  setTimeout(() => { if (gen === ghostGen && ghostWait) fadeGhost(); }, to ? 900 : 180);
+}
+let ghostWait = null, ghostGen = 0;
+function fadeGhost() {
+  const g = $("ghost"), gen = ghostGen;
+  ghostWait = null;
+  g.style.opacity = "0";
+  setTimeout(() => {
+    if (gen !== ghostGen) return; // lifted again meanwhile: the ghost is the new one's
+    g.classList.remove("on", "settle"); g.style.transform = ""; g.style.opacity = "1"; delete g.dataset.settling;
+  }, 140);
+}
+/** A cheap fingerprint of the stream under a stage rectangle: a few rows of
+ *  pixels, to notice when the video there changes. */
+function regionPrint(r) {
+  const sx = (r.x - view.x) / view.s, sy = (r.y - view.y) / view.s, sw = r.w / view.s, sh = r.h / view.s;
+  if (!(sw > 4 && sh > 4)) return null;
+  try {
+    const d = ctx.getImageData(Math.max(0, Math.round(sx + sw * 0.2)), Math.max(0, Math.round(sy + sh * 0.15)), Math.max(1, Math.round(sw * 0.6)), Math.max(1, Math.round(sh * 0.7))).data;
+    const out = new Float32Array(16);
+    for (let i = 0; i < d.length; i += 4) out[(i >> 2) % 16] += d[i] + d[i + 1] + d[i + 2];
+    return out;
+  } catch { return null; }
+}
+function printsDiffer(a, b, by = 0.03) {
+  if (!a || !b) return true;
+  let diff = 0, total = 0;
+  for (let i = 0; i < a.length; i++) { diff += Math.abs(a[i] - b[i]); total += a[i]; }
+  return diff > total * by;
+}
+/** After each video frame: has the swap reached the picture under the ghost
+ *  and finished moving? Fade once it changed and then held still for three
+ *  frames in a row (~50 ms at 60 fps). */
+function checkGhost() {
+  const w = ghostWait;
+  if (!w?.watch) return;
+  const now = performance.now();
+  if (now > w.until) return fadeGhost();
+  const p = regionPrint(w.dest);
+  if (!p) return;
+  if (!w.changed) { if (printsDiffer(w.watch, p)) { w.changed = true; w.last = p; } return; }
+  w.still = printsDiffer(w.last, p, 0.004) ? 0 : w.still + 1;
+  w.last = p;
+  if (w.still >= 3 && now >= w.settled) fadeGhost();
 }
 function lift(w, at) {
   lifted = { w, target: null, dragging: false, at };
