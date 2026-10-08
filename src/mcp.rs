@@ -193,6 +193,7 @@ fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Resul
                 .args([
                     "-u",
                     "critical",
+                    "--",
                     &format!("{who} needs you (workspace {})", s.workspace),
                     text("message")?,
                 ])

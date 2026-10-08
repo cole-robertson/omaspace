@@ -96,11 +96,15 @@ back to `~` and is reported, never silently.
   Trust rule, checked per request:
   - this machine is **user-owned** → the caller must be owned by the same
     Tailscale user (`UserProfile.ID`);
-  - this machine is **tagged** (e.g. `tag:cole`) → the caller must carry at least
+  - this machine is **tagged** (e.g. `tag:desktop`) → the caller must carry at least
     one of this machine's tags.
   Anything else, or a whois failure, gets 403. No tokens to copy around.
   (Verified 2026-10-02: Tailscale Serve adds no identity headers for tagged
   devices, so whois on the raw peer address is the reliable identity.)
+- The machine itself is never a trusted caller (whois identifies a local
+  process's connection to the machine's own address as this node), and the
+  daemon only answers requests whose `Host` is its tailnet IP and that carry
+  no `Origin` header (no DNS rebinding, no cross-site forms).
 - Peers are discovered from `tailscale status --json`: online peers that pass
   the same trust rule and answer `GET /v1/hello` on port 7787.
 
@@ -301,7 +305,9 @@ window-only view. For reference, cua Spaces' viewer encodes on the CPU
 ### Security
 
 Same trust rule as the rest of omaspace: the view endpoint is only on the
-tailnet and every connection is checked with tailscaled whois. Browsers reach
+tailnet and every connection is checked with tailscaled whois. The machine
+itself is never trusted: a connection from it to its own tailnet address (any
+local process can make one) is identified as this node and refused. Browsers reach
 it through `tailscale serve --https=7788 unix:$XDG_RUNTIME_DIR/omaspace-view.sock`
 (HTTPS is needed for WebCodecs' secure context). The view listens only on that
 unix socket (0600, in the user's 0700 runtime directory), never on TCP: a

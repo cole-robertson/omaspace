@@ -23,6 +23,13 @@ input, so it only talks to your own devices. [SPEC.md](SPEC.md) has the details;
   every request is identified with tailscaled's `whois` and refused unless the caller belongs to
   the same Tailscale user (or a login listed in `~/.config/omaspace/owners`). There are no tokens
   to copy around.
+- **Not even this machine itself.** A connection from this machine to its own tailnet address
+  is identified as this machine, and any local process could make one (another Unix user, a
+  container, a sandboxed app), so both the daemon and the live view refuse it. You reach a
+  machine's desktop from your other devices.
+- **No DNS rebinding.** The daemon only answers requests addressed to its tailnet IP and
+  refuses any request that carries an `Origin` header, so a web page can't reach it by
+  pointing its own hostname at your machine or by posting a cross-site form.
 - **The live view has no network port of its own.** It listens on a unix socket only you can
   open (`$XDG_RUNTIME_DIR/omaspace-view.sock`, mode 0600), published on your tailnet with
   `tailscale serve`. Other users on the same machine can't reach it.
@@ -42,4 +49,17 @@ input, so it only talks to your own devices. [SPEC.md](SPEC.md) has the details;
   launchers (the browser with http(s) URLs, the terminal in a directory, an installed `.desktop`
   file), with every argument quoted.
 - **File transfers stay in your home folder,** out of top-level hidden folders and out of
-  folders that tools run code from (`.git`, `.envrc`, `.vscode`, …).
+  files and folders that tools run code from (`.git`, `.envrc`, `.vscode`, `.cargo`,
+  `mise.toml`, `.nvim.lua`, …). The rules apply to where a symlink really leads, a write never
+  follows a symlink, and a name a peer sends back in a listing can't climb out of the folder.
+
+## What omaspace trusts
+
+- **Your devices fully.** Any device that passes the trust rule can see and drive the desktop,
+  read and write files in your home folder, and (with your policy's permission) move sign-ins.
+  On a tagged machine, that is every device sharing one of its tags, so don't share a tag with
+  CI runners or servers you wouldn't hand your desktop to.
+- **Agents as you.** An agent's MCP tools run as your user: `terminal_run` and `open_app` run
+  any command, and an agent's browser starts with your sign-ins. The workspace an agent claims
+  keeps it out of your way and is where it's expected to work, but it is not a sandbox. Give
+  agents the same trust you'd give a script you run yourself.

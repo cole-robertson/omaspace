@@ -254,6 +254,8 @@ fn read_head(stream: &mut UnixStream) -> anyhow::Result<Head> {
 
 /// The caller's identity: only this user and Tailscale Serve (root) can open
 /// the socket, and the forwarded tailnet address must pass whois + trust.
+/// Trust never includes this machine itself (see `tailnet::is_self`): any
+/// local process could reach the view through Serve and be identified as it.
 fn caller(headers: &HashMap<String, String>, me: &Identity) -> anyhow::Result<Identity> {
     let ip = forwarded_ip(headers)?;
     let id = tailnet::whois(&format!("{ip}:1"))?;
@@ -722,6 +724,7 @@ fn view_files(
                 )?;
                 let _ = std::process::Command::new("notify-send")
                     .args([
+                        "--",
                         "omaspace",
                         &format!(
                             "Received {}",
@@ -802,7 +805,7 @@ fn agent_report(shared: &Shared, who: &Identity, body: &Value) -> Value {
             json!({"type": "help", "message": format!("{name}: {message}")}),
         );
         let _ = std::process::Command::new("notify-send")
-            .args(["-u", "critical", "Agent needs you", message])
+            .args(["-u", "critical", "--", "Agent needs you", message])
             .status();
     }
     json!({"ok": true})
@@ -1708,11 +1711,16 @@ fn on_message(shared: &Shared, id: u64, name: &str, msg: &Value) {
             }
         }
         "focus_window" => lua_dispatch(&format!("hl.dsp.focus({{ window = {} }})", addr(msg))),
-        "move_window" => lua_dispatch(&format!(
-            "hl.dsp.window.move({{ workspace = {}, follow = false, window = {} }})",
-            hypr::lua_string(&msg["workspace"].to_string()),
-            addr(msg)
-        )),
+        // Only a numbered workspace: not `special:` or `name:` selectors.
+        "move_window" => {
+            if let Some(ws) = msg["workspace"].as_i64().filter(|w| (1..=99).contains(w)) {
+                lua_dispatch(&format!(
+                    "hl.dsp.window.move({{ workspace = {}, follow = false, window = {} }})",
+                    hypr::lua_string(&ws.to_string()),
+                    addr(msg)
+                ))
+            }
+        }
         "close_window" => lua_dispatch(&format!(
             "hl.dsp.window.close({{ window = {} }})",
             addr(msg)

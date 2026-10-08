@@ -22,7 +22,8 @@ pub struct Daemon {
 }
 
 pub fn serve(daemon: Daemon) -> anyhow::Result<()> {
-    let addr = format!("{}:{PORT}", tailnet::my_ipv4()?);
+    let ip = tailnet::my_ipv4()?;
+    let addr = format!("{ip}:{PORT}");
     let server = Server::http(&addr).map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
     std::fs::create_dir_all(&daemon.stash)?;
     eprintln!(
@@ -30,6 +31,12 @@ pub fn serve(daemon: Daemon) -> anyhow::Result<()> {
         daemon.me.name, daemon.desktop
     );
     for request in server.incoming_requests() {
+        if let Err(e) = not_from_a_browser(&request, &ip) {
+            if let Err(e) = reply(request, 403, json!({ "error": e.to_string() })) {
+                eprintln!("response failed: {e}");
+            }
+            continue;
+        }
         let caller = request.remote_addr().map(|a| a.to_string());
         let verdict = caller
             .as_deref()
@@ -51,6 +58,32 @@ pub fn serve(daemon: Daemon) -> anyhow::Result<()> {
             eprintln!("response failed: {e}");
         }
     }
+    Ok(())
+}
+
+/// Only omaspace's own client talks to the daemon, by IP address, and never
+/// a web page. A page on one of your devices could otherwise reach it with
+/// your device's tailnet identity: by rebinding its own hostname to this
+/// machine's address (the Host header then names the page's site), or with
+/// a plain cross-site form POST (which carries an Origin header).
+fn not_from_a_browser(request: &Request, ip: &str) -> anyhow::Result<()> {
+    let header = |name: &'static str| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().to_string())
+    };
+    host_and_origin_allowed(header("Host").as_deref(), header("Origin").is_some(), ip)
+}
+
+fn host_and_origin_allowed(host: Option<&str>, origin: bool, ip: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!origin, "browser requests are not accepted");
+    let host = host.unwrap_or("");
+    anyhow::ensure!(
+        host == ip || host == format!("{ip}:{PORT}"),
+        "unexpected Host {host:?}"
+    );
     Ok(())
 }
 
@@ -351,5 +384,26 @@ mod tests {
         );
         assert!(scope_from("window=$(rm -rf)").is_err());
         assert!(scope_from("workspace=x").is_err());
+    }
+}
+
+#[cfg(test)]
+mod browser_requests {
+    use super::host_and_origin_allowed as ok;
+    const IP: &str = "100.64.0.10";
+
+    #[test]
+    fn only_omaspace_itself_by_address() {
+        assert!(ok(Some("100.64.0.10:7787"), false, IP).is_ok());
+        assert!(ok(Some("100.64.0.10"), false, IP).is_ok());
+        assert!(
+            ok(Some("evil.example:7787"), false, IP).is_err(),
+            "DNS rebinding: the page's own hostname"
+        );
+        assert!(ok(None, false, IP).is_err());
+        assert!(
+            ok(Some("100.64.0.10:7787"), true, IP).is_err(),
+            "a cross-site form POST carries an Origin"
+        );
     }
 }

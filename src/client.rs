@@ -279,11 +279,9 @@ pub fn get_file(
     if let Some(parent) = local.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut out = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&part)?;
+    let mut out = crate::xfer::open_no_follow(&part, false)?;
     out.set_len(offset)?;
+    std::io::Seek::seek(&mut out, std::io::SeekFrom::Start(offset))?;
     progress(offset, size);
     if offset < size {
         let mut resp = big_agent()

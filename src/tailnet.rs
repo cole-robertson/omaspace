@@ -11,6 +11,8 @@ const SOCKET: &str = "/run/tailscale/tailscaled.sock";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Identity {
+    /// The node's stable ID (empty when unknown, e.g. in tests).
+    pub node_id: String,
     pub name: String,
     pub user_id: i64,
     pub tags: Vec<String>,
@@ -34,6 +36,8 @@ struct Profile {
 
 #[derive(Deserialize)]
 struct Node {
+    #[serde(rename = "StableID", default)]
+    stable_id: String,
     #[serde(rename = "ComputedName", default)]
     name: String,
     #[serde(rename = "User", default)]
@@ -56,6 +60,8 @@ struct Status {
 
 #[derive(Deserialize, Clone)]
 pub struct Peer {
+    #[serde(rename = "ID", default)]
+    pub id: String,
     #[serde(rename = "HostName")]
     pub host: String,
     #[serde(rename = "UserID")]
@@ -105,6 +111,7 @@ pub fn whois(addr: &str) -> anyhow::Result<Identity> {
         String::new()
     };
     Ok(Identity {
+        node_id: w.node.stable_id,
         name: w.node.name,
         user_id: w.node.user,
         tags,
@@ -115,6 +122,7 @@ pub fn whois(addr: &str) -> anyhow::Result<Identity> {
 pub fn me() -> anyhow::Result<Identity> {
     let s: Status = serde_json::from_str(&local_api("status")?)?;
     Ok(Identity {
+        node_id: s.me.id.clone(),
         name: s.me.host,
         user_id: s.me.user_id,
         tags: s.me.tags.unwrap_or_default(),
@@ -168,7 +176,16 @@ pub fn peers() -> anyhow::Result<Vec<Peer>> {
 /// Same owner: on a user-owned machine the caller must belong to the same
 /// Tailscale user; on a tagged machine it must share one of this machine's tags.
 pub fn trusted(me: &Identity, caller: &Identity) -> bool {
-    trusted_with(me, caller, &owners())
+    !is_self(me, caller) && trusted_with(me, caller, &owners())
+}
+
+/// A caller on this very machine. Whois maps a connection from here to this
+/// machine's own tailnet address back to this node, which would pass the
+/// same-user rule; but on this machine any process can make one (another
+/// Unix user, a container, a sandboxed app), so it is never trusted. Your
+/// own tools reach this machine's desktop directly, not over the network.
+pub fn is_self(me: &Identity, caller: &Identity) -> bool {
+    !me.node_id.is_empty() && me.node_id == caller.node_id
 }
 
 /// The trust rule, with the owners list passed in (tests):
@@ -207,6 +224,7 @@ pub fn peer_trusted(me: &Identity, peer: &Peer) -> bool {
     trusted(
         me,
         &Identity {
+            node_id: peer.id.clone(),
             name: peer.host.clone(),
             user_id: peer.user_id,
             tags: peer.tags.clone().unwrap_or_default(),
@@ -219,8 +237,14 @@ pub fn peer_trusted(me: &Identity, peer: &Peer) -> bool {
 mod tests {
     use super::*;
 
+    /// A device of `user`; each call is a different node.
     fn id(user: i64, tags: &[&str]) -> Identity {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         Identity {
+            node_id: format!(
+                "n{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
             name: "n".into(),
             user_id: user,
             tags: tags.iter().map(|t| t.to_string()).collect(),
@@ -230,8 +254,8 @@ mod tests {
 
     #[test]
     fn tagged_machines_trust_only_callers_sharing_a_tag() {
-        let me = id(1, &["tag:cole"]);
-        assert!(trusted(&me, &id(2, &["tag:cole"])));
+        let me = id(1, &["tag:desktop"]);
+        assert!(trusted(&me, &id(2, &["tag:desktop"])));
         assert!(
             !trusted(&me, &id(1, &[])),
             "an untagged device of another owner is not a peer"
@@ -241,14 +265,16 @@ mod tests {
 
     #[test]
     fn tagged_machines_trust_their_listed_owners_devices_only() {
-        let me = id(1, &["tag:cole"]);
+        let me = id(1, &["tag:desktop"]);
         let phone = Identity {
+            node_id: "nphone".into(),
             name: "iphone".into(),
             user_id: 9,
             tags: vec![],
             login: "owner@example.com".into(),
         };
         let colleague = Identity {
+            node_id: "nmac".into(),
             name: "mac".into(),
             user_id: 8,
             tags: vec![],
@@ -275,5 +301,24 @@ mod tests {
             !trusted(&me, &id(7, &["tag:shared"])),
             "a tagged device no longer belongs to the user"
         );
+    }
+
+    /// A connection from this machine to its own tailnet address is
+    /// identified as this node: any local process (another Unix user, a
+    /// container) could make one, so it must not count as your device.
+    #[test]
+    fn this_machine_itself_is_never_a_trusted_caller() {
+        let me = id(7, &[]);
+        let same_node = Identity {
+            name: "itself".into(),
+            ..me.clone()
+        };
+        assert!(!trusted(&me, &same_node));
+        assert!(
+            trusted(&me, &id(7, &[])),
+            "another device of yours still is"
+        );
+        let tagged = id(1, &["tag:desktop"]);
+        assert!(!trusted(&tagged, &tagged.clone()));
     }
 }

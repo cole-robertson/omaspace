@@ -135,7 +135,9 @@ fn remote_index(peer: &str, root: &str) -> anyhow::Result<BTreeMap<String, Seen>
         };
         let v = client::files_list(peer, &path)?;
         for e in v["entries"].as_array().into_iter().flatten() {
-            let name = e["name"].as_str().unwrap_or("");
+            // The peer names entries; each must be a plain name in this folder,
+            // or a local path built from it could point anywhere.
+            let name = crate::xfer::plain_name(e["name"].as_str().unwrap_or(""))?;
             if name.starts_with('.') || SKIP.contains(&name) || name.ends_with(crate::xfer::PART) {
                 continue;
             }

@@ -344,13 +344,13 @@ fn cmd_get(args: &[String]) -> anyhow::Result<()> {
         );
         let remotes: Vec<(String, std::path::PathBuf)> = if stat["dir"].as_bool() == Some(true) {
             let root = stat["path"].as_str().unwrap_or(remote).to_string();
-            let name = root.rsplit('/').next().unwrap_or("folder").to_string();
+            let name = xfer::plain_name(root.rsplit('/').next().unwrap_or("folder"))?.to_string();
             remote_walk(peer, &root)?
                 .into_iter()
                 .map(|rel| (format!("{root}/{rel}"), to.join(&name).join(&rel)))
                 .collect()
         } else {
-            let name = remote.rsplit('/').next().unwrap_or("file").to_string();
+            let name = xfer::plain_name(remote.rsplit('/').next().unwrap_or("file"))?.to_string();
             vec![(remote.to_string(), to.join(name))]
         };
         for (r, local) in remotes {
@@ -397,7 +397,9 @@ pub fn remote_walk(peer: &str, root: &str) -> anyhow::Result<Vec<String>> {
         };
         let v = client::files_list(peer, &path)?;
         for e in v["entries"].as_array().into_iter().flatten() {
-            let name = e["name"].as_str().unwrap_or("");
+            // The peer names entries; each must be a plain name in this folder,
+            // or a local path built from it could point anywhere.
+            let name = crate::xfer::plain_name(e["name"].as_str().unwrap_or(""))?;
             if name.starts_with('.') || name.ends_with(xfer::PART) {
                 continue;
             }

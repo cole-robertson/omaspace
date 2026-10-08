@@ -7,3 +7,6 @@ pkg/omaspace-driver/plugin/
 /e2e/node_modules/
 /e2e/report/
 /e2e/test-results/
+
+# Demo/launch tooling lives outside the repo.
+/e2e/demo*

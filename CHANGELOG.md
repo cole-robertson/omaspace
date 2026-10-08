@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.4 - 2026-10-08
+
+Security hardening before launch.
+
+- **This machine is no longer trusted as one of your devices.** A connection
+  from a machine to its own tailnet address is identified as that machine, so
+  any local process (another Unix user, a container) could reach the daemon
+  and the live view and pass the trust rule. Both now refuse it.
+- **The daemon refuses browser requests.** It only answers requests addressed
+  to its tailnet IP that carry no `Origin`, so a web page can't reach it by DNS
+  rebinding or with a cross-site form.
+- **File transfers can't be redirected by symlinks.** The hidden-folder and
+  blocklist rules apply to where a path really leads; part files are opened
+  without following symlinks; and names a peer sends in a listing (sync,
+  `get`) must be plain names, so they can't point outside the folder.
+- **More auto-run files are refused** for transfers: `.cargo`, `.npmrc`,
+  `mise.toml`, `.tool-versions`, `.nvim.lua`, `.exrc`, `.zed`, `.devcontainer`
+  and others.
+- Lua strings sent to Hyprland use an explicit escaper; moving a window only
+  accepts a numbered workspace; `notify-send` text can't be read as options.
+- SECURITY.md now says plainly what omaspace trusts, including that agents
+  run as you.
+
 ## 0.1.3 - 2026-10-08
 
 - **Phone screens no longer pile up in the display list.** Each phone gets a
@@ -19,9 +42,6 @@
   capture can't start.
 - **Taking over answers an agent's request for help,** so it isn't shown
   again after you hand back.
-- **Demo tooling** in `e2e/`: `demo.mjs` records a scripted tour of a desk
-  (and a peer), and `demo-launch.py`, `demo-card.py` and `demo-music.py`
-  render the launch videos, social card and soundtrack from it.
 
 ## 0.1.2 - 2026-10-06
 

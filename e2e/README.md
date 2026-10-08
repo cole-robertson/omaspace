@@ -43,21 +43,3 @@ Chromium. Everything a test creates is cleaned up after it, pass or fail.
 The HTML report, with screenshots and traces of failures, is left in
 `e2e/report/`: `npx playwright show-report e2e/report`.
 
-## Demo videos
-
-`demo.mjs` records a scripted tour (laptop and phone views, agents, take
-over, sending a window to another machine) into a directory of frames and
-timings; the Python scripts render it. They need Playwright's Chromium,
-Python 3 with Pillow and numpy, ffmpeg, and the Noto Sans and JetBrains Mono
-fonts.
-
-```sh
-OMASPACE_E2E_DESK=mydesk OMASPACE_E2E_PEER=mylaptop OUT=/tmp/demo node demo.mjs
-python3 demo-launch.py /tmp/demo /tmp/omaspace-launch.mp4             # 1920x1080
-python3 demo-launch.py /tmp/demo /tmp/omaspace-teaser.mp4 --teaser --vertical
-python3 demo-card.py   /tmp/demo /tmp/omaspace-card.png               # social card
-```
-
-`demo-launch.py` also takes `--short` (about 15 s). `demo-music.py OUT.wav
-SECONDS CUT...` synthesizes a soundtrack timed to the cuts; mux it in with
-ffmpeg. `demo-site/` is the fake bank the agent signs in to.

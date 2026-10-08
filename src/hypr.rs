@@ -192,12 +192,38 @@ pub fn dispatch(lua: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A Lua string literal for any text. Every byte that isn't plain printable
+/// ASCII is written as a decimal escape (`\ddd`), which every Lua accepts,
+/// so nothing a viewer or agent sends can end the string early.
 pub fn lua_string(value: &str) -> String {
-    format!("{value:?}")
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for b in value.bytes() {
+        match b {
+            b'"' | b'\\' => {
+                out.push('\\');
+                out.push(b as char);
+            }
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\{b:03}")),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lua_strings_cannot_be_broken_out_of() {
+        assert_eq!(super::lua_string("3"), "\"3\"");
+        assert_eq!(super::lua_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(super::lua_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(super::lua_string("x\n]]--"), "\"x\\010]]--\"");
+        assert_eq!(super::lua_string("é"), "\"\\195\\169\"");
+        assert_eq!(super::lua_string("\u{7f}"), "\"\\127\"");
+    }
+
     /// A hyprctl that never answers (Hyprland stuck): the call gives up on
     /// time, and the next calls fail fast instead of piling up behind it.
     #[test]
