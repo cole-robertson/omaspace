@@ -60,9 +60,18 @@ struct Store {
 }
 
 /// Pause (`Some(name)`) or resume (`None`) every agent on this machine.
+/// Taking over answers the agents' requests for help: a person is on it, so
+/// the requests are cleared rather than shown again after hand back.
 pub fn set_taken_over(home: &Path, by: Option<&str>) -> anyhow::Result<()> {
     with_store(home, |store| {
         store.taken_over_by = by.map(|b| b.chars().take(80).collect());
+        if by.is_some() {
+            for s in &mut store.spaces {
+                if s.help.take().is_some() {
+                    s.status = "you took over".into();
+                }
+            }
+        }
         Ok(())
     })
 }
@@ -519,6 +528,33 @@ mod tests {
         );
         release(home.path(), "a").unwrap();
         assert!(list(home.path()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod take_over {
+    #[test]
+    fn taking_over_answers_help_requests_and_handing_back_resumes() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        // A space as claim() leaves it (claim needs a live Hyprland).
+        std::fs::create_dir_all(h.join(".local/state/omaspace")).unwrap();
+        std::fs::write(
+            h.join(".local/state/omaspace/agents.json"),
+            r#"{"spaces":[{"workspace":9,"agent":"A","task":"book dinner","status":"","help":"which time?","browsers":[],"claimed_at":1}]}"#,
+        )
+        .unwrap();
+        super::set_taken_over(h, Some("Phone")).unwrap();
+        assert_eq!(super::taken_over_by(h).as_deref(), Some("Phone"));
+        let s = super::space_of(h, "A").unwrap();
+        assert_eq!(
+            s.help, None,
+            "a person is on it: the request doesn't come back after hand back"
+        );
+        assert_eq!(s.status, "you took over");
+        super::set_taken_over(h, None).unwrap();
+        assert_eq!(super::taken_over_by(h), None);
+        assert_eq!(super::space_of(h, "A").unwrap().help, None);
     }
 }
 

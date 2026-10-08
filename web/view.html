@@ -673,11 +673,11 @@ const pos = e => streamPos(e.clientX, e.clientY);
 // Mouse / pen: direct pointer (desktop browsers).
 stageEl.addEventListener("pointermove", e => { if (e.pointerType !== "touch") send({ type: "pointer", ...pos(e) }); });
 stageEl.addEventListener("pointerdown", e => {
-  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #control, #files")) return;
+  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #control, #files, #machines")) return;
   canvas.focus(); stageEl.setPointerCapture(e.pointerId);
   send({ type: "pointer", ...pos(e), button: e.button, down: true }); e.preventDefault();
 });
-stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #control, #files")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
+stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #control, #files, #machines")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
 stageEl.addEventListener("contextmenu", e => e.preventDefault());
 stageEl.addEventListener("wheel", e => {
   e.preventDefault();
@@ -915,7 +915,7 @@ function swipeEnd(dir) {
 }
 let lastSwipe = null;
 stageEl.addEventListener("touchstart", e => {
-  if (e.target.closest("#zoom, aside, #banner, #control, #files, #agent-bar")) return;
+  if (e.target.closest("#zoom, aside, #banner, #control, #files, #agent-bar, #machines")) return;
   if (lifted && !e.touches[1]) { drop(); e.preventDefault(); gesture = null; return; }
   e.preventDefault();
   for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });

@@ -121,6 +121,15 @@ pub fn serve() -> anyhow::Result<()> {
             }
         }
     });
+    // Phone screens nobody is watching, however they were left behind.
+    let orphans = shared.clone();
+    std::thread::spawn(move || {
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            sweep_orphan_phone_screens(&orphans, &mut seen);
+        }
+    });
     // Expire agent cursors that stopped reporting.
     let sweep = shared.clone();
     std::thread::spawn(move || {
@@ -1061,10 +1070,14 @@ fn viewer(
             .cloned()
             .or(Some(found))
     });
-    let phone = query(path, "phone").and_then(|v| {
-        let (w, h) = v.split_once('x')?;
-        Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
-    });
+    // Phone mode streams a virtual screen with wf-recorder; without it, fall
+    // back to the whole desktop rather than failing (and leaking the screen).
+    let phone = query(path, "phone")
+        .filter(|_| crate::omarchy::which("wf-recorder").is_some())
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
+        });
     let source = match phone {
         Some((w, h)) => {
             let scale = query(path, "scale")
@@ -1073,11 +1086,32 @@ fn viewer(
             let workspace = query(path, "workspace")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(|| hypr::active_workspace().unwrap_or(1));
-            phone_screen(&shared, id, w, h, scale, workspace)?
+            match phone_screen(&shared, id, w, h, scale, workspace) {
+                Ok(src) => src,
+                Err(e) => {
+                    // A screen created before the failure must not linger.
+                    let name = format!("OSP-PHONE-{}-{id}", std::process::id());
+                    if monitor(&name).is_some() {
+                        remove_phone_screen(&name, Some(workspace), &shared.output.0, false);
+                    }
+                    shared.participants.lock().unwrap().remove(&id);
+                    shared.outboxes.lock().unwrap().remove(&id);
+                    return Err(e);
+                }
+            }
         }
         None => source_for(&shared, path, window.as_ref()),
     };
-    let capture = shared.captures.get(&source)?;
+    let capture = match shared.captures.get(&source) {
+        Ok(c) => c,
+        Err(e) => {
+            // Don't leave the virtual screen behind when its capture can't start.
+            end_phone_screen(&shared, id);
+            shared.participants.lock().unwrap().remove(&id);
+            shared.outboxes.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+    };
     let frames = capture.subscribe();
     ws.send(Message::text(json!({"type": "hello", "id": id, "me": name, "stream": {"width": source.width, "height": source.height, "window": window.as_ref().map(|w| &w["address"])}, "output": {"width": source.width, "height": source.height}, "phone": phone.is_some()}).to_string()))?;
     let my_output = || {
@@ -1256,11 +1290,11 @@ fn phone_screen(
     workspace: i64,
 ) -> anyhow::Result<Source> {
     // Unique across restarts: viewer ids start again at 1, and a name still
-    // held by an old (disabled) output can't be created again.
+    // held by an old output can't be created again.
     let name = format!("OSP-PHONE-{}-{id}", std::process::id());
     // Hyprland only accepts a scale that divides the mode into whole logical
     // pixels; round the size down to a multiple of the scale's denominator.
-    let scale = clean_scale(scale);
+    let scale = phone_scale(w, scale);
     let step = scale_step(scale);
     let fit = |v: u32| (v.clamp(320, 3000) / step * step).max(step);
     let (w, h) = (fit(w), fit(h));
@@ -1275,8 +1309,8 @@ fn phone_screen(
     ));
     if monitor(&name).is_none() {
         let phones = hypr::monitors_all()?.as_array().map_or(0, |a| {
-            // A disabled one is inert (Hyprland can't remove it until it
-            // restarts): it shows nothing, so it doesn't count.
+            // A disabled one shows nothing, so it doesn't count (the orphan
+            // sweep removes it).
             a.iter()
                 .filter(|m| is_phone_screen(&m["name"]) && m["disabled"] != true)
                 .count()
@@ -1326,6 +1360,26 @@ fn phone_screen(
     })
 }
 
+/// The narrowest a phone screen may be, in logical pixels: Chromium won't
+/// size a window with tabs below 500 px, so a narrower screen leaves every
+/// browser hanging off its right edge.
+const PHONE_MIN_LOGICAL_WIDTH: f64 = 520.0;
+
+/// The phone's own scale, lowered (to one Hyprland renders cleanly) until the
+/// screen is at least PHONE_MIN_LOGICAL_WIDTH wide. A 1290 px wide iPhone at
+/// 3x would be 430 wide; at 2x it's 645, and apps lay out as on a small tablet.
+fn phone_scale(width_px: u32, wanted: f64) -> f64 {
+    let mut s = clean_scale(wanted);
+    while s > 1.0 && f64::from(width_px) / s < PHONE_MIN_LOGICAL_WIDTH {
+        s = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
+            .into_iter()
+            .rev()
+            .find(|o| *o < s)
+            .unwrap_or(1.0);
+    }
+    s
+}
+
 /// Scales Hyprland renders cleanly (whole and common fractional ones).
 fn clean_scale(s: f64) -> f64 {
     const OK: [f64; 6] = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
@@ -1353,9 +1407,11 @@ fn is_phone_screen(name: &Value) -> bool {
 
 /// Remove one phone screen without ever stalling the compositor's caller:
 /// its workspace goes back to `primary` first, then the output is removed,
-/// each step with a deadline. (Don't disable it first: Hyprland can't remove
-/// a disabled headless output, and it would linger.) Returns false if Hyprland
-/// stopped answering, so the caller can stop issuing more removals.
+/// each step with a deadline. Hyprland can't remove a disabled headless
+/// output (it answers "output not found"), and something can disable one
+/// behind our back (a monitor-config reload, a display panel toggle), so a
+/// disabled one is enabled again first. Returns false if Hyprland stopped
+/// answering, so the caller can stop issuing more removals.
 fn remove_phone_screen(name: &str, workspace: Option<i64>, primary: &str, disabled: bool) -> bool {
     if let Some(ws) = workspace.filter(|w| *w > 0) {
         lua_dispatch(&format!(
@@ -1368,15 +1424,24 @@ fn remove_phone_screen(name: &str, workspace: Option<i64>, primary: &str, disabl
         ));
     }
     if disabled {
-        // Hyprland can't remove a disabled headless output (it answers
-        // "output not found"); it goes when Hyprland restarts. It shows
-        // nothing and doesn't count toward the limit, so leave it alone.
-        return true;
+        lua_dispatch_eval(&format!(
+            "hl.monitor({{ output = {}, disabled = false, mode = \"1080x1920@60\", position = \"auto-right\", scale = 2 }})",
+            hypr::lua_string(name)
+        ));
     }
-    match hypr::ctl(
-        &["output", "remove", name],
-        std::time::Duration::from_secs(5),
-    ) {
+    let remove = || {
+        hypr::ctl(
+            &["output", "remove", name],
+            std::time::Duration::from_secs(5),
+        )
+    };
+    let mut result = remove();
+    // Re-enabling takes effect on Hyprland's next frame; give it one.
+    if disabled && matches!(&result, Ok(out) if !out.contains("ok")) {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        result = remove();
+    }
+    match result {
         Ok(out) if out.contains("ok") => true,
         Ok(out) => {
             eprintln!("view: removing {name}: {}", out.trim());
@@ -1394,14 +1459,25 @@ fn remove_phone_screen(name: &str, workspace: Option<i64>, primary: &str, disabl
 /// time on a background thread, so startup never waits on the compositor,
 /// and stop at the first one Hyprland doesn't answer for.
 fn remove_stale_phone_screens(primary: &str) {
-    let Ok(list) = hypr::monitors_all() else {
+    let stale = phone_screens_except(&[]);
+    if stale.is_empty() {
         return;
+    }
+    let primary = primary.to_string();
+    std::thread::spawn(move || remove_phone_screens(stale, &primary));
+}
+
+/// Every phone screen Hyprland has, other than those named in `keep`:
+/// (name, workspace it shows, disabled).
+fn phone_screens_except(keep: &[String]) -> Vec<(String, Option<i64>, bool)> {
+    let Ok(list) = hypr::monitors_all() else {
+        return Vec::new();
     };
-    let stale: Vec<(String, Option<i64>, bool)> = list
-        .as_array()
+    list.as_array()
         .into_iter()
         .flatten()
         .filter(|m| is_phone_screen(&m["name"]))
+        .filter(|m| !keep.iter().any(|k| m["name"] == k.as_str()))
         .map(|m| {
             (
                 m["name"].as_str().unwrap_or("").to_string(),
@@ -1409,25 +1485,49 @@ fn remove_stale_phone_screens(primary: &str) {
                 m["disabled"].as_bool().unwrap_or(false),
             )
         })
-        .collect();
-    if stale.is_empty() {
-        return;
-    }
-    let primary = primary.to_string();
-    std::thread::spawn(move || {
-        for (name, ws, disabled) in stale {
-            if disabled {
-                // Inert until Hyprland restarts; it can't be removed.
-                continue;
-            }
-            if !remove_phone_screen(&name, ws, &primary, false) {
-                eprintln!("view: Hyprland isn't answering; left the other phone screens in place");
-                return;
-            }
-            eprintln!("view: removed leftover phone screen {name}");
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        .collect()
+}
+
+fn remove_phone_screens(list: Vec<(String, Option<i64>, bool)>, primary: &str) {
+    for (name, ws, disabled) in list {
+        if !remove_phone_screen(&name, ws, primary, disabled) {
+            eprintln!("view: Hyprland isn't answering; left the other phone screens in place");
+            return;
         }
-    });
+        eprintln!("view: removed leftover phone screen {name}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Phone screens no viewer owns: left by a viewer whose cleanup didn't run,
+/// or disabled by something else. Swept every so often, so they can never
+/// pile up in the display list. A screen is only swept on the second sweep
+/// that finds it orphaned, so one being created right now is never touched.
+fn sweep_orphan_phone_screens(shared: &Shared, seen: &mut std::collections::HashSet<String>) {
+    let owned: Vec<String> = shared
+        .phones
+        .lock()
+        .unwrap()
+        .values()
+        .map(|(n, _)| n.clone())
+        .collect();
+    let mine = format!("OSP-PHONE-{}-", std::process::id());
+    let orphans: Vec<_> = phone_screens_except(&owned)
+        .into_iter()
+        // Ours but not (yet) in `phones`: still being set up, or a disabled
+        // one whose viewer left. Only the disabled kind is ours to sweep.
+        .filter(|(n, _, disabled)| !n.starts_with(&mine) || *disabled)
+        .collect();
+    let now: std::collections::HashSet<String> =
+        orphans.iter().map(|(n, _, _)| n.clone()).collect();
+    let due: Vec<_> = orphans
+        .into_iter()
+        .filter(|(n, _, _)| seen.contains(n))
+        .collect();
+    *seen = now;
+    if !due.is_empty() {
+        remove_phone_screens(due, &shared.output.0);
+    }
 }
 
 fn end_phone_screen(shared: &Shared, id: u64) {
@@ -1723,6 +1823,19 @@ mod tests {
             ":root{--t-accent:#7aa2f7;--t-dark-background:#13141c;}"
         );
         assert_eq!(super::theme_css(""), "");
+    }
+
+    #[test]
+    fn phone_screens_are_wide_enough_for_a_browser() {
+        // iPhone 15 Pro Max: 1290 px at 3x would be 430 logical, too narrow.
+        assert_eq!(super::phone_scale(1290, 3.0), 2.0);
+        assert!(1290.0 / super::phone_scale(1290, 3.0) >= super::PHONE_MIN_LOGICAL_WIDTH);
+        // A small phone at 2x (750 px) is already narrow: 1.25 gives 600.
+        assert_eq!(super::phone_scale(750, 2.0), 1.25);
+        // A wide tablet keeps its own scale.
+        assert_eq!(super::phone_scale(2048, 2.0), 2.0);
+        // Never below 1.
+        assert_eq!(super::phone_scale(400, 3.0), 1.0);
     }
 
     #[test]

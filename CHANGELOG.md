@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.3 - 2026-10-08
+
+- **Phone screens no longer pile up in the display list.** Each phone gets a
+  virtual `OSP-PHONE-…` screen. One that had been switched off (by a monitor
+  config reload or a display panel toggle) couldn't be removed, so they
+  collected in Omarchy's display panel until Hyprland restarted. The view now
+  switches such a screen back on and removes it, and every 30 seconds it
+  sweeps away any phone screen no viewer is using, including ones left from
+  before it started.
+- **Phones stream at a usable width.** A phone screen is now at least 520
+  logical pixels wide (the scale is lowered to fit), so browsers no longer
+  hang off the right edge and terminals aren't cramped.
+- **The machine switcher works on phones.** Taps on it were swallowed by the
+  stage's touch handling.
+- **Phone mode needs wf-recorder;** without it the view falls back to the
+  whole desktop instead of failing, and a phone screen is removed if its
+  capture can't start.
+- **Taking over answers an agent's request for help,** so it isn't shown
+  again after you hand back.
+- **Demo tooling** in `e2e/`: `demo.mjs` records a scripted tour of a desk
+  (and a peer), and `demo-launch.py`, `demo-card.py` and `demo-music.py`
+  render the launch videos, social card and soundtrack from it.
+
 ## 0.1.2 - 2026-10-06
 
 - **Swapping tiles on a phone lands cleanly.** When you let go, the window
