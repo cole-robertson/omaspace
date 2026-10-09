@@ -192,6 +192,7 @@ test("an agent's terminal: runs commands and reads the screen while the user kee
 });
 
 test("an agent uses a desktop app (GTK file manager) by its accessibility tree, in the background", async ({ desk }) => {
+  test.skip(desk.sh("test -d /usr/share/omaspace-driver && echo yes || echo no", { check: false }).trim() !== "yes", "needs the omaspace-driver package on the desk");
   const dir = desk.scratch("agent-app");
   desk.write(`${dir}/report-q3.txt`, "x");
   const space = desk.mcp("claim_space", { agent: AGENT, task: "look at files" });

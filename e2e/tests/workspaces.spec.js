@@ -41,8 +41,10 @@ test("take back: browser tabs and a terminal come back from the other machine", 
   for (const w of wins) peer.onCleanup(() => peer.dispatch(`hl.dsp.window.close({ window = "address:${w.address}" })`));
   expect(wins.map(w => w.class).sort()).toEqual(expect.arrayContaining(["chromium"]));
   // Chromium writes its session file a few seconds after tabs open.
+  // Another test's browser may be on the same workspace: find this one by its tabs.
   const tabs = () => JSON.parse(peer.omaspace(["snapshot", "--workspace", String(WS)]).stdout)
-    .workspaces[0].windows.find(w => w.kind === "browser")?.urls;
+    .workspaces[0].windows.filter(w => w.kind === "browser").map(w => w.urls)
+    .find(u => u.includes("https://www.rfc-editor.org/"));
   await expect.poll(tabs, { timeout: 30_000 }).toEqual(["https://example.org/", "https://www.rfc-editor.org/"]);
 });
 

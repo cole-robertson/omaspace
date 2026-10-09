@@ -78,6 +78,7 @@ test("phones dictate with the keyboard's mic: no hold-to-talk button there", asy
 });
 
 test("hold to talk (laptop): speech is transcribed on the machine and typed into the terminal", async ({ desk, talker }) => {
+  test.skip(!desk.sh("command -v voxtype || true", { check: false }).trim(), "needs Omarchy's dictation on the desk (omarchy-voxtype-install)");
   const dir = desk.scratch("talk");
   const term = await desk.terminal(dir, WS);
   const view = await talker.open(desk);

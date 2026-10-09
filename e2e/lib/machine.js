@@ -5,7 +5,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { hostname } from "node:os";
 
-const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(for s in $(ls -t /run/user/$(id -u)/hypr/); do HYPRLAND_INSTANCE_SIGNATURE=$s timeout 2 hyprctl -j version >/dev/null 2>&1 && { echo $s; break; }; done) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && echo ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
+const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(for s in $(ls -t /run/user/$(id -u)/hypr/); do HYPRLAND_INSTANCE_SIGNATURE=$s timeout 2 hyprctl -j version >/dev/null 2>&1 && { echo $s; break; }; done) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && readlink -f ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
 
 export class Machine {
   /** @param {string} name tailnet hostname, e.g. "peer" */
@@ -155,7 +155,9 @@ export class Machine {
     const out = this.sh(`printf '%s\\n' ${shq(lines)} | timeout 120 omaspace mcp | tail -1`, { timeout: 150_000 });
     const r = JSON.parse(out).result;
     if (r.isError) throw new Error(`${tool}: ${r.content[0].text}`);
-    return r.structuredContent;
+    // The text is the tool's own value; structuredContent wraps a list in
+    // { items } (MCP requires an object there).
+    return JSON.parse(r.content[0].text);
   }
 
   /** Tailscale IPv4 of this machine. */
