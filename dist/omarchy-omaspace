@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Give, take back or watch an Omarchy workspace on one of your machines (omaspace)
-# omarchy:args=[spaces|menu|send|pull|stash|watch|send-file|sync-folder|give-window] [peer] [workspace|address]
+# omarchy:args=[spaces|menu|send|pull|stash|watch|send-file|get-file|sync-folder|synced|give-window] [peer] [workspace|address]
 # omarchy:examples=omarchy-omaspace|omarchy-omaspace send|omarchy-omaspace pull alpha 3|omarchy-omaspace watch alpha
 
 set -uo pipefail
@@ -41,13 +41,17 @@ if [[ $action == menu ]]; then
     $'\uf019\tTake a workspace back\tpull it, with its project folders' \
     $'\uf06e\tWatch another machine\tlive view, take over with your mouse' \
     $'\uf15b\tSend files to…\tto that machine\'s Downloads' \
-    $'\uf021\tSync a folder with…\tkeep a folder the same on both') || exit 0
+    $'\uf019\tGet files from…\tfrom that machine\'s Downloads' \
+    $'\uf021\tSync a folder with…\tkeep a folder the same on both' \
+    $'\uf07c\tSynced folders\tsee how they\'re doing, or stop one') || exit 0
   case $choice in
   Give*) action=send ;;
   Take*) action=pull ;;
   Watch*) action=watch ;;
   Send\ files*) action=send-file ;;
-  Sync*) action=sync-folder ;;
+  Get\ files*) action=get-file ;;
+  Sync\ a*) action=sync-folder ;;
+  Synced*) action=synced ;;
   *) exit 0 ;;
   esac
 fi
@@ -82,16 +86,48 @@ if [[ $action == send-file ]]; then
   exit 0
 fi
 
+if [[ $action == get-file ]]; then
+  pick_peer "Get files from"
+  mapfile -t names < <(omaspace ls "$peer" "~/Downloads" --names 2>/dev/null)
+  ((${#names[@]})) || { notify-send "omaspace" "Nothing in $peer's Downloads"; exit 0; }
+  name=$(printf '%s\n' "${names[@]}" | omarchy-menu-select "From $peer's Downloads") || exit 0
+  [[ -n $name ]] || exit 0
+  mkdir -p ~/Downloads
+  if output=$(omaspace get "$peer" "~/Downloads/$name" --to ~/Downloads 2>&1); then
+    notify-send "omaspace" "Got $name from $peer (~/Downloads)"
+  else
+    notify-send -u critical "omaspace" "Getting $name failed: $(tail -2 <<<"$output")"
+    exit 1
+  fi
+  exit 0
+fi
+
+# Kept in sync by the omaspace daemon, so it carries on after a restart.
 if [[ $action == sync-folder ]]; then
   folder=$(omarchy-file-select --title "Folder to keep in sync" --directory) || exit 0
   [[ -n $folder ]] || exit 0
   pick_peer "Sync $(basename "$folder") with"
-  # A user service per folder, so the sync keeps running in the background.
-  unit="omaspace-sync-$(printf '%s' "$peer:$folder" | sha256sum | cut -c1-10)"
-  systemd-run --user --unit="$unit" --description="omaspace sync $folder <-> $peer" \
-    "$(command -v omaspace)" sync "$peer" "$folder" >/dev/null 2>&1 ||
-    systemctl --user restart "$unit"
-  notify-send "omaspace" "Syncing $(basename "$folder") with $peer (stop: systemctl --user stop $unit)"
+  notify-send "omaspace" "Syncing $(basename "$folder") with $peer…"
+  if output=$(omaspace sync add "$peer" "$folder" 2>&1); then
+    notify-send "omaspace" "$(basename "$folder") is kept in sync with $peer (Synced folders in this menu to stop)"
+  else
+    notify-send -u critical "omaspace" "Couldn't sync $(basename "$folder"): $(tail -2 <<<"$output")"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ $action == synced ]]; then
+  mapfile -t rows < <(omaspace sync list)
+  [[ ${rows[0]:-} == no\ folders* ]] && { notify-send "omaspace" "No folders kept in sync yet"; exit 0; }
+  row=$(printf '%s\n' "${rows[@]}" | omarchy-menu-select "Synced folders (pick one to stop syncing it)") || exit 0
+  [[ -n $row ]] || exit 0
+  folder=$(awk '{ print $1 }' <<<"$row")
+  peer=$(awk '{ print $3 }' <<<"$row" | cut -d: -f1)
+  stop=$(printf 'Stop syncing\nKeep it' | omarchy-menu-select "$folder ⇄ $peer") || exit 0
+  [[ $stop == Stop* ]] || exit 0
+  omaspace sync remove "${folder/#\~/$HOME}" "$peer" >/dev/null 2>&1 &&
+    notify-send "omaspace" "Stopped syncing $folder with $peer (the files stay on both)"
   exit 0
 fi
 

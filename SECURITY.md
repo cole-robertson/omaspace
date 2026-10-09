@@ -43,8 +43,9 @@ input, so it only talks to your own devices. [SPEC.md](SPEC.md) has the details;
   backs off when Hyprland doesn't answer instead of queueing more work on it. At most four
   phone-shaped virtual screens can exist, and leftovers are cleaned up one at a time in the
   background.
-- **Sign-ins are opt-in.** Cookies, saved passwords and history stay behind unless you allow
-  them for a transfer.
+- **Sign-ins are opt-in, and scoped.** Cookies, saved passwords and history stay behind unless
+  you allow them for a transfer, and a machine only accepts sign-ins for the sites open in the
+  windows it's given.
 - **Restores never run a shell string.** A snapshot can only reopen windows through fixed
   launchers (the browser with http(s) URLs, the terminal in a directory, an installed `.desktop`
   file), with every argument quoted.
@@ -62,4 +63,5 @@ input, so it only talks to your own devices. [SPEC.md](SPEC.md) has the details;
 - **Agents as you.** An agent's MCP tools run as your user: `terminal_run` and `open_app` run
   any command, and an agent's browser starts with your sign-ins. The workspace an agent claims
   keeps it out of your way and is where it's expected to work, but it is not a sandbox. Give
-  agents the same trust you'd give a script you run yourself.
+  agents the same trust you'd give a script you run yourself. Each MCP connection acts as one
+  agent, so agents can't drive each other's browsers or windows through omaspace.

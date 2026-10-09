@@ -98,6 +98,19 @@ impl Snapshot {
         }];
     }
 
+    /// Every URL open in the snapshot's browsers and web apps.
+    pub fn urls(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for window in self.workspaces.iter().flat_map(|w| &w.windows) {
+            match &window.content {
+                Content::Browser { urls, .. } => out.extend(urls.iter().cloned()),
+                Content::WebApp { url, .. } => out.push(url.clone()),
+                _ => {}
+            }
+        }
+        out
+    }
+
     pub fn window_count(&self) -> usize {
         self.workspaces.iter().map(|w| w.windows.len()).sum()
     }
@@ -108,6 +121,18 @@ impl Snapshot {
             "unsupported snapshot format {:?}",
             self.format
         );
+        // Sign-ins may only be for sites open in this snapshot's windows: a
+        // sender can't plant cookies for every site ("*" is whole-profile
+        // data, for a machine's own agents only, never sent between peers).
+        let open = crate::profile::sites_of(&self.urls());
+        for (class, data) in &self.browser_data {
+            for site in &data.sites {
+                anyhow::ensure!(
+                    open.contains(site),
+                    "{class}: sign-ins for {site:?}, which isn't open in this snapshot"
+                );
+            }
+        }
         for window in self.workspaces.iter().flat_map(|w| &w.windows) {
             match &window.content {
                 Content::Browser { browser, urls, .. } => {
@@ -220,6 +245,36 @@ mod tests {
             active: 0,
         };
         assert!(snapshot_with(ok).validate().is_ok());
+    }
+
+    #[test]
+    fn sign_ins_only_for_sites_that_are_open() {
+        let open = Content::Browser {
+            browser: "chromium".into(),
+            urls: vec!["https://github.com/x".into()],
+            active: 0,
+        };
+        let with_sites = |sites: &[&str]| {
+            let mut s = snapshot_with(open.clone());
+            s.browser_data.insert(
+                "chromium".into(),
+                crate::profile::ProfileData {
+                    sites: sites.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                },
+            );
+            s
+        };
+        assert!(with_sites(&["github.com"]).validate().is_ok());
+        assert!(
+            with_sites(&["*"]).validate().is_err(),
+            "whole-profile data never travels between machines"
+        );
+        assert!(
+            with_sites(&["github.com", "bank.example"])
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

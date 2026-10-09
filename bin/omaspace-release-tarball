@@ -1,0 +1,21 @@
+#!/bin/bash
+# Build the release tarballs into dist-out/: omaspace-<version>-x86_64-linux.tar.gz
+# and a copy without the version (what the README's "latest" link downloads),
+# each with a .sha256.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+cargo build --release --locked
+out=dist-out
+rm -rf "$out" && mkdir -p "$out"
+dir="omaspace-$version-x86_64-linux"
+mkdir -p "$out/$dir"
+cp -r dist CHANGELOG.md LICENSE README.md "$out/$dir/"
+install -m755 target/release/omaspace "$out/$dir/omaspace"
+cd "$out"
+tar czf "$dir.tar.gz" "$dir"
+cp "$dir.tar.gz" omaspace-x86_64-linux.tar.gz
+sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+sha256sum omaspace-x86_64-linux.tar.gz > omaspace-x86_64-linux.tar.gz.sha256
+rm -rf "$dir"
+ls -1

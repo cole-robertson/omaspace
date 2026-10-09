@@ -100,18 +100,7 @@ pub fn run(home: &Path) -> anyhow::Result<()> {
     run_cmd("systemctl", &["--user", "daemon-reload"])?;
     run_cmd("systemctl", &["--user", "enable", "omaspace-view"])?;
     run_cmd("systemctl", &["--user", "restart", "omaspace-view"])?;
-    let target = format!("unix:{}", crate::view::socket_path().display());
-    match Command::new("tailscale")
-        .args(["serve", "--bg", "--https=7788", &target])
-        .status()
-    {
-        Ok(s) if s.success() => {
-            println!("live view at https://<this machine>:7788 on your tailnet")
-        }
-        _ => println!(
-            "installed the live view; publish it with: tailscale serve --bg --https=7788 {target} (may need `sudo tailscale set --operator=$USER`)"
-        ),
-    }
+    publish_view()?;
 
     // Agents' hands for desktop apps: the omaspace-driver package (cua-driver
     // + cua's Hyprland plugin, with the Omarchy patches). Optional; without it
@@ -168,6 +157,50 @@ pub fn run(home: &Path) -> anyhow::Result<()> {
         );
     } else {
         println!("no ~/.config/hypr/bindings.lua (not an Omarchy desktop?): skipped keybindings");
+    }
+    Ok(())
+}
+
+/// Publish the live view on the tailnet with `tailscale serve`. Tailscale
+/// only lets root publish a unix socket, so this runs it with sudo (one
+/// password prompt), unless it's already published.
+fn publish_view() -> anyhow::Result<()> {
+    let target = format!("unix:{}", crate::view::socket_path().display());
+    let name = crate::tailnet::my_dns_name()
+        .map(|n| n.trim_end_matches('.').to_string())
+        .unwrap_or_else(|_| "<this machine>".into());
+    let published = || {
+        Command::new("tailscale")
+            .args(["serve", "status", "--json"])
+            .output()
+            .ok()
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .is_some_and(|v| {
+                v["Web"].as_object().is_some_and(|web| {
+                    web.iter().any(|(host, conf)| {
+                        host.ends_with(":7788") && conf["Handlers"]["/"]["Proxy"] == target.as_str()
+                    })
+                })
+            })
+    };
+    let ok = published()
+        || {
+            println!(
+                "publishing the live view on your tailnet (Tailscale needs sudo for this; it may ask for your password)"
+            );
+            Command::new("sudo")
+                .args(["tailscale", "serve", "--bg", "--https=7788", &target])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+                && published()
+        };
+    if ok {
+        println!("live view at https://{name}:7788 (open it from your phone or another machine)");
+    } else {
+        println!(
+            "installed the live view, but couldn't publish it; run: sudo tailscale serve --bg --https=7788 {target}"
+        );
     }
     Ok(())
 }

@@ -264,6 +264,10 @@ impl Capture {
     }
 }
 
+/// At most this many encoders at once (whole screens at different widths,
+/// single windows and phone screens together).
+pub const MAX_CAPTURES: usize = 8;
+
 /// Captures keyed by source, started on first viewer, stopped after the last.
 #[derive(Default)]
 pub struct Captures {
@@ -283,6 +287,13 @@ impl Captures {
         if let Some(c) = running.get(source) {
             return Ok(c.clone());
         }
+        // Each source is a hardware encoder; many at once can exhaust the GPU
+        // and freeze the session, so a viewer can't start them without bound.
+        anyhow::ensure!(
+            running.len() < MAX_CAPTURES,
+            "{} streams are already running on this machine; close a view first",
+            running.len()
+        );
         let c = Capture::start(source)?;
         running.insert(source.clone(), c.clone());
         Ok(c)

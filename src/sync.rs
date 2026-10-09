@@ -198,6 +198,20 @@ pub fn pass(
     remote_root: &str,
     quiet: bool,
 ) -> anyhow::Result<usize> {
+    pass_with(peer, local_root, remote_root, &mut |line| {
+        if !quiet {
+            println!("{line}");
+        }
+    })
+}
+
+/// One sync pass, each change described to `say`.
+fn pass_with(
+    peer: &str,
+    local_root: &Path,
+    remote_root: &str,
+    say: &mut dyn FnMut(String),
+) -> anyhow::Result<usize> {
     std::fs::create_dir_all(local_root)?;
     let state = state_file(peer, local_root, remote_root);
     let base: Base = std::fs::read(&state)
@@ -225,11 +239,6 @@ pub fn pass(
         !lh.is_empty() && lh == rh
     };
     let actions = plan((&base.local, &base.remote), &local, &remote, &mut same);
-    let say = |s: String| {
-        if !quiet {
-            println!("{s}");
-        }
-    };
     for a in &actions {
         match a {
             Action::Push(rel) => {
@@ -302,30 +311,274 @@ fn post(peer: &str, what: &str, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `omaspace sync <peer> <local dir> [remote dir] [--once]`
+// ---- folders kept in sync, run by the daemon ------------------------------
+
+/// A folder kept the same on this machine and a peer, until removed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Folder {
+    pub peer: String,
+    /// Absolute path here.
+    pub local: PathBuf,
+    /// `~/…` on the peer.
+    pub remote: String,
+}
+
+/// How a folder's syncing is going (written after every pass).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Status {
+    /// When the last pass finished without an error (Unix seconds).
+    pub last_ok: u64,
+    pub last_error: Option<String>,
+    /// The most recent changes, newest first (at most 20).
+    pub recent: Vec<String>,
+}
+
+fn state_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".local/state/omaspace")
+}
+
+fn folders_path() -> PathBuf {
+    state_dir().join("sync-folders.json")
+}
+
+pub fn folders() -> Vec<Folder> {
+    std::fs::read(folders_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_folders(list: &[Folder]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(state_dir())?;
+    let tmp = folders_path().with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
+    std::fs::rename(tmp, folders_path())?;
+    Ok(())
+}
+
+fn status_path(f: &Folder) -> PathBuf {
+    state_file(&f.peer, &f.local, &f.remote).with_extension("status.json")
+}
+
+pub fn status(f: &Folder) -> Status {
+    std::fs::read(status_path(f))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// One pass for a saved folder, recording how it went.
+fn pass_recorded(f: &Folder) -> anyhow::Result<usize> {
+    let mut st = status(f);
+    let mut changes = Vec::new();
+    let result = pass_with(&f.peer, &f.local, &f.remote, &mut |line| changes.push(line));
+    match &result {
+        Ok(_) => {
+            st.last_ok = now();
+            st.last_error = None;
+        }
+        Err(e) => st.last_error = Some(format!("{e:#}")),
+    }
+    if !changes.is_empty() {
+        let stamp = now();
+        let mut fresh: Vec<String> = changes
+            .into_iter()
+            .map(|c| format!("{stamp} {c}"))
+            .rev()
+            .collect();
+        fresh.extend(st.recent);
+        fresh.truncate(20);
+        st.recent = fresh;
+    }
+    std::fs::create_dir_all(status_path(f).parent().unwrap())?;
+    std::fs::write(status_path(f), serde_json::to_vec(&st)?)?;
+    result
+}
+
+/// The daemon's sync loop: every saved folder, every few seconds, for as long
+/// as it runs, so folders keep syncing across reboots. A peer that's offline
+/// is retried with backoff (up to a minute) rather than every pass.
+pub fn run_saved() {
+    use std::collections::HashMap;
+    let mut wait: HashMap<(String, PathBuf), (u32, std::time::Instant)> = HashMap::new();
+    loop {
+        for f in folders() {
+            let key = (f.peer.clone(), f.local.clone());
+            if let Some((_, until)) = wait.get(&key)
+                && std::time::Instant::now() < *until
+            {
+                continue;
+            }
+            match pass_recorded(&f) {
+                Ok(_) => {
+                    wait.remove(&key);
+                }
+                Err(e) => {
+                    let fails = wait.get(&key).map_or(0, |(n, _)| *n) + 1;
+                    let secs = (3u64 << fails.min(5)).min(60);
+                    if fails == 1 {
+                        eprintln!("sync {} <-> {}: {e:#}", f.local.display(), f.peer);
+                    }
+                    wait.insert(
+                        key,
+                        (
+                            fails,
+                            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+                        ),
+                    );
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+fn absolute(dir: &str) -> anyhow::Result<PathBuf> {
+    let p = PathBuf::from(dir);
+    Ok(if p.is_absolute() {
+        p
+    } else if let Some(rest) = dir.strip_prefix("~/") {
+        state_dir()
+            .parent()
+            .and_then(Path::parent)
+            .map(|h| h.join(rest))
+            .unwrap_or(p)
+    } else {
+        std::env::current_dir()?.join(p)
+    })
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+fn ago(t: u64) -> String {
+    if t == 0 {
+        return "never".into();
+    }
+    let s = now().saturating_sub(t);
+    match s {
+        0..=59 => format!("{s}s ago"),
+        60..=3599 => format!("{}m ago", s / 60),
+        _ => format!("{}h ago", s / 3600),
+    }
+}
+
+const USAGE: &str = "usage:
+  omaspace sync add <peer> <folder> [remote folder]   keep a folder the same on both, from now on
+  omaspace sync list                                  folders kept in sync, and how they're doing
+  omaspace sync remove <folder> [peer]                stop syncing it (both copies stay)
+  omaspace sync <peer> <folder> [remote folder] [--once]   sync in the foreground (Ctrl-C to stop)";
+
+/// `omaspace sync …`
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("add") => {
+            let peer = args.get(1).context(USAGE)?;
+            let local = absolute(args.get(2).context(USAGE)?)?;
+            std::fs::create_dir_all(&local)?;
+            let local = local.canonicalize()?;
+            let remote = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| crate::snapshot::to_portable(&local, &home()));
+            anyhow::ensure!(
+                remote.starts_with("~/"),
+                "the folder must be inside your home folder (or name the remote one: ~/…)"
+            );
+            anyhow::ensure!(
+                client::peers()?
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case(peer)),
+                "{peer} isn't one of your machines running omaspace (see omaspace peers)"
+            );
+            let f = Folder {
+                peer: peer.clone(),
+                local,
+                remote,
+            };
+            // A first pass now, so mistakes show here, not later in a log.
+            let n = pass_recorded(&f)?;
+            let mut list = folders();
+            list.retain(|x| !(x.peer == f.peer && x.local == f.local));
+            list.push(f.clone());
+            save_folders(&list)?;
+            println!(
+                "syncing {} ⇄ {}:{} ({n} change(s) so far); it keeps syncing in the background, also after a restart",
+                f.local.display(),
+                f.peer,
+                f.remote
+            );
+            Ok(())
+        }
+        Some("list") | Some("status") => {
+            let list = folders();
+            if list.is_empty() {
+                println!("no folders kept in sync (add one: omaspace sync add <peer> <folder>)");
+            }
+            for f in &list {
+                let st = status(f);
+                let state = match &st.last_error {
+                    Some(e) => format!("error: {e}"),
+                    None => format!("synced {}", ago(st.last_ok)),
+                };
+                println!(
+                    "{}  ⇄  {}:{}   {state}",
+                    crate::snapshot::to_portable(&f.local, &home()),
+                    f.peer,
+                    f.remote
+                );
+            }
+            Ok(())
+        }
+        Some("remove") => {
+            let local = absolute(args.get(1).context(USAGE)?)?;
+            let local = local.canonicalize().unwrap_or(local);
+            let peer = args.get(2);
+            let mut list = folders();
+            let before = list.len();
+            list.retain(|f| !(f.local == local && peer.is_none_or(|p| &f.peer == p)));
+            anyhow::ensure!(
+                list.len() < before,
+                "{} isn't kept in sync",
+                local.display()
+            );
+            save_folders(&list)?;
+            println!(
+                "stopped syncing {} (the files stay on both machines)",
+                local.display()
+            );
+            Ok(())
+        }
+        Some("help") | Some("--help") | None => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        _ => run_foreground(args),
+    }
+}
+
+/// `omaspace sync <peer> <local dir> [remote dir] [--once]`
+fn run_foreground(args: &[String]) -> anyhow::Result<()> {
     let once = args.iter().any(|a| a == "--once");
     let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let peer = pos
-        .first()
-        .context("usage: omaspace sync <peer> <local dir> [remote dir] [--once]")?;
-    let local = PathBuf::from(
-        pos.get(1)
-            .context("usage: omaspace sync <peer> <local dir> [remote dir]")?
-            .as_str(),
-    );
-    let local = if local.is_absolute() {
-        local
-    } else {
-        std::env::current_dir()?.join(local)
-    };
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let peer = pos.first().context(USAGE)?;
+    let local = absolute(pos.get(1).context(USAGE)?)?;
     let remote = pos
         .get(2)
         .map(|s| s.to_string())
-        .unwrap_or_else(|| crate::snapshot::to_portable(&local, &home));
+        .unwrap_or_else(|| crate::snapshot::to_portable(&local, &home()));
     anyhow::ensure!(
         remote.starts_with("~/"),
         "remote folder must be inside the peer's home (~/…)"

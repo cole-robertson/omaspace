@@ -181,6 +181,13 @@ pub fn apply(profile: &Path, data: &ProfileData) -> anyhow::Result<Applied> {
         }
     }
     if !data.local_storage.is_empty() {
+        // Only storage for the declared sites may be written, like cookies.
+        anyhow::ensure!(
+            data.local_storage
+                .iter()
+                .all(|e| storage::origin_matches(&e.origin, &data.sites)),
+            "site data outside the workspace's sites"
+        );
         applied.local_storage = storage::write(profile, &data.local_storage)?;
     }
     if !data.cookies.is_empty() {

@@ -185,6 +185,8 @@
   #files .row { display:flex; align-items:center; gap:8px; padding:8px 4px; border-bottom:1px solid var(--line); }
   #files .row .n { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #files .row .s { color:var(--dim); font-size:11px; }
+  #files .row.sync { color:var(--accent); font-size:12px; }
+  #files .row.sync.bad { color:#f7768e; }
   #files a { color:var(--accent); text-decoration:none; }
   #files .head { display:flex; gap:6px; align-items:center; margin-bottom:6px; }
   .spacer { flex:1; }
@@ -1154,11 +1156,33 @@ async function upload(file, dir = "~/Downloads") {
   } catch (e) { t.textContent = `✕ ${file.name}: ${e.message}`; setTimeout(() => t.remove(), 6000); }
 }
 let filesDir = "~/Downloads";
+// Folders kept in sync with other machines: marked in the list, and shown
+// on top when you're in one (with what, and how it's going).
+let synced = [];
+async function loadSynced() { try { synced = (await (await fetch("/v1/view/synced")).json()).folders || []; } catch { synced = []; } }
+const syncOf = p => synced.find(f => p === f.path || p.startsWith(f.path + "/"));
+const ago = t => { if (!t) return "not yet"; const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ago`; };
 async function listFiles(dir = filesDir) {
-  const r = await fetch(`/v1/files/list?path=${encodeURIComponent(dir)}`); const j = await r.json();
+  const [r] = await Promise.all([fetch(`/v1/files/list?path=${encodeURIComponent(dir)}`), loadSynced()]); const j = await r.json();
   if (!r.ok) { toast("✕ " + j.error); return; }
   filesDir = j.path; $("files-path").textContent = j.path;
   const list = $("files-list"); list.innerHTML = "";
+  const here = syncOf(j.path);
+  if (here) {
+    const s = document.createElement("div"); s.className = "row sync" + (here.error ? " bad" : "");
+    s.innerHTML = `<span class="n"></span>`;
+    s.querySelector(".n").textContent = here.error ? `⟳ sync with ${here.peer} failing: ${here.error}` : `⟳ kept in sync with ${here.peer} · ${ago(here.last_ok)}`;
+    list.append(s);
+  }
+  if (j.path === "~" && synced.length) {
+    for (const f of synced.filter(f => f.path.split("/").length > 2)) {
+      const row = document.createElement("div"); row.className = "row";
+      row.innerHTML = `<a href="#" class="n"></a><span class="s"></span>`;
+      row.querySelector("a").textContent = "⟳ " + f.path; row.querySelector(".s").textContent = f.peer;
+      row.querySelector("a").onclick = ev => { ev.preventDefault(); listFiles(f.path); };
+      list.append(row);
+    }
+  }
   if (j.path !== "~") {
     const up = document.createElement("div"); up.className = "row";
     up.innerHTML = `<a href="#" class="n">↩ ..</a>`; up.querySelector("a").onclick = e => { e.preventDefault(); listFiles(j.path.split("/").slice(0, -1).join("/") || "~"); };
@@ -1168,7 +1192,7 @@ async function listFiles(dir = filesDir) {
     if (e.name.startsWith(".") || e.name.endsWith(".omaspace-part")) continue;
     const row = document.createElement("div"); row.className = "row";
     const p = `${j.path}/${e.name}`;
-    if (e.dir) { row.innerHTML = `<a href="#" class="n"></a>`; row.querySelector("a").textContent = "📁 " + e.name; row.querySelector("a").onclick = ev => { ev.preventDefault(); listFiles(p); }; }
+    if (e.dir) { const sf = synced.find(f => f.path === p); row.innerHTML = `<a href="#" class="n"></a><span class="s"></span>`; row.querySelector("a").textContent = (sf ? "⟳ " : "📁 ") + e.name; if (sf) row.querySelector(".s").textContent = sf.error ? "sync failing" : "⇄ " + sf.peer; row.querySelector("a").onclick = ev => { ev.preventDefault(); listFiles(p); }; }
     else { row.innerHTML = `<a class="n"></a><span class="s"></span>`; const a = row.querySelector("a"); a.textContent = e.name; a.href = `/v1/files/get?path=${encodeURIComponent(p)}`; a.download = e.name; row.querySelector(".s").textContent = human(e.size); }
     list.append(row);
   }
@@ -1260,7 +1284,7 @@ async function openMachines() {
       b.querySelector(".d").textContent = m.here ? "watching now" : "live view";
       b.querySelector(".who").innerHTML = (p.agents.length ? `<span class="ag">\u{f06a9} ${p.agents.length}</span>` : "") + `<span>\u{f06d0} ${p.watching}</span>`;
       b.querySelector(".who").title = p.agents.length ? `agents: ${p.agents.join(", ")}` : "";
-      if (p.help) b.querySelector(".d").textContent = "agent needs you: " + p.help;
+      if (p.needs_you) b.querySelector(".d").textContent = "an agent needs you";
     }).catch(() => { if (!m.here) { b.disabled = true; b.querySelector(".d").textContent = "live view not published yet"; } });
   }
 }

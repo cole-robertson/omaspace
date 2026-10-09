@@ -71,3 +71,42 @@ test("paths outside home or in hidden folders are refused", async ({ peer, desk 
   expect(peer.omaspace(["put", desk.name, `${src}/a.txt`, "--to", "~/../../etc"], { check: false }).out).toMatch(/'\.\.' is not allowed/);
   expect(peer.omaspace(["put", desk.name, `${src}/a.txt`, "--to", "/etc"], { check: false }).out).toMatch(/outside your home/);
 });
+
+test("a folder added with `sync add` keeps syncing in the background, also after the service restarts", async ({ peer, desk }) => {
+  const dir = peer.scratch("kept");
+  desk.onCleanup(() => desk.rm(dir));
+  peer.onCleanup(() => peer.omaspace(["sync", "remove", dir], { check: false }));
+  peer.write(`${dir}/first.txt`, "one");
+  const { out } = peer.omaspace(["sync", "add", desk.name, dir]);
+  expect(out).toMatch(/keeps syncing in the background/);
+  expect(desk.read(`${dir}/first.txt`)).toBe("one");
+  expect(peer.omaspace(["sync", "list"]).out).toContain(desk.name);
+
+  // No command running now: the daemon carries it, both ways.
+  peer.write(`${dir}/later.txt`, "from peer");
+  await waitFor(() => desk.exists(`${dir}/later.txt`), "peer's new file reaches desk", 20_000);
+  desk.write(`${dir}/back.txt`, "from desk");
+  await waitFor(() => peer.exists(`${dir}/back.txt`), "desk's new file reaches peer", 20_000);
+
+  // A restart (or a reboot) doesn't stop it.
+  peer.sh("systemctl --user restart omaspace");
+  peer.write(`${dir}/after-restart.txt`, "still syncing");
+  await waitFor(() => desk.exists(`${dir}/after-restart.txt`), "syncs after a restart", 30_000);
+  expect(peer.omaspace(["sync", "list"]).out).toMatch(/synced/);
+
+  peer.omaspace(["sync", "remove", dir]);
+  peer.write(`${dir}/after-remove.txt`, "x");
+  await new Promise(r => setTimeout(r, 8000));
+  expect(desk.exists(`${dir}/after-remove.txt`), "removed: no longer synced").toBe(false);
+  expect(desk.read(`${dir}/first.txt`), "removing keeps the files").toBe("one");
+});
+
+test("a symlink can't smuggle a file into a hidden folder", async ({ peer, desk }) => {
+  const src = peer.scratch("smuggle");
+  peer.write(`${src}/a.txt`, "x");
+  const link = desk.scratch("innocent");
+  desk.sh(`rmdir ${link} && ln -s ~/.ssh ${link}`);
+  desk.onCleanup(() => desk.sh(`rm -f ${link}`));
+  const remote = link.replace(/^\/home\/[^/]+/, "~");
+  expect(peer.omaspace(["put", desk.name, `${src}/a.txt`, "--to", remote], { check: false }).out).toMatch(/hidden folder/);
+});

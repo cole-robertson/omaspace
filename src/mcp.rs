@@ -29,6 +29,14 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["peer"], "properties": {"peer": {"type": "string"}, "workspace": workspace}}},
         {"name": "pull_workspace", "description": "Reopen a peer's workspace on this machine.",
          "inputSchema": {"type": "object", "required": ["peer"], "properties": {"peer": {"type": "string"}, "workspace": workspace}}},
+        {"name": "list_files", "description": "List a folder on one of your machines (default ~/Downloads).",
+         "inputSchema": {"type": "object", "required": ["peer"], "properties": {"peer": {"type": "string"}, "path": {"type": "string", "default": "~/Downloads"}}}},
+        {"name": "send_file", "description": "Copy a file from this machine to a peer (default: into its ~/Downloads). Never overwrites: a clash gets ' (2)'.",
+         "inputSchema": {"type": "object", "required": ["peer", "path"], "properties": {"peer": {"type": "string"}, "path": {"type": "string", "description": "file here (~ allowed)"}, "to": {"type": "string", "default": "~/Downloads"}}}},
+        {"name": "get_file", "description": "Copy a file from a peer to this machine (default: into ~/Downloads).",
+         "inputSchema": {"type": "object", "required": ["peer", "path"], "properties": {"peer": {"type": "string"}, "path": {"type": "string", "description": "file there (~/…)"}, "to": {"type": "string", "default": "~/Downloads"}}}},
+        {"name": "synced_folders", "description": "Folders on this machine kept in sync with your other machines, and how each is doing.",
+         "inputSchema": {"type": "object", "properties": {}}},
 
         {"name": "claim_space", "description": "Get your own Omarchy workspace on this machine to work in, next to the user (they can swipe to it and watch). Call first; keeps the same workspace for your agent name.",
          "inputSchema": {"type": "object", "required": ["agent"], "properties": {"agent": agent_name.clone(), "task": {"type": "string", "description": "one line: what you're doing"}}}},
@@ -119,6 +127,40 @@ fn call(name: &str, args: &Value) -> anyhow::Result<Value> {
             let (snapshot, _) = client::snapshot_from(peer, &query)?;
             Ok(serde_json::to_value(restore::restore(&snapshot, &home)?)?)
         }
+        "list_files" => {
+            let peer = peer.ok_or_else(|| anyhow::anyhow!("peer is required"))?;
+            client::files_list(peer, args["path"].as_str().unwrap_or("~/Downloads"))
+        }
+        "send_file" => {
+            let peer = peer.ok_or_else(|| anyhow::anyhow!("peer is required"))?;
+            let from = crate::snapshot::from_portable(
+                args["path"].as_str().ok_or_else(|| anyhow::anyhow!("path is required"))?,
+                &home,
+            );
+            anyhow::ensure!(from.is_file(), "{} is not a file", from.display());
+            let name = from.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            let to = format!("{}/{name}", args["to"].as_str().unwrap_or("~/Downloads").trim_end_matches('/'));
+            let landed = client::put_file(peer, &from, &to, false, &mut |_, _| {})?;
+            Ok(json!({ "sent": from, "to": landed }))
+        }
+        "get_file" => {
+            let peer = peer.ok_or_else(|| anyhow::anyhow!("peer is required"))?;
+            let remote = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("path is required"))?;
+            let name = crate::xfer::plain_name(remote.rsplit('/').next().unwrap_or(""))?;
+            let dir = crate::snapshot::from_portable(args["to"].as_str().unwrap_or("~/Downloads"), &home);
+            std::fs::create_dir_all(&dir)?;
+            client::get_file(peer, remote, &dir.join(name), &mut |_, _| {})?;
+            Ok(json!({ "received": remote, "into": dir }))
+        }
+        "synced_folders" => Ok(json!(
+            crate::sync::folders()
+                .iter()
+                .map(|f| {
+                    let st = crate::sync::status(f);
+                    json!({"folder": f.local, "peer": f.peer, "remote": f.remote, "last_ok": st.last_ok, "error": st.last_error})
+                })
+                .collect::<Vec<_>>()
+        )),
         _ => agent_call(&home, name, args),
     }
 }
@@ -146,6 +188,24 @@ fn acts_on_desktop(tool: &str) -> bool {
     )
 }
 
+/// One MCP server process serves one agent: the first agent name it's used
+/// with is its name for good, so one agent can't drive another's browser,
+/// terminals or windows by passing a different name.
+static BOUND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn bind_agent(who: &str) -> anyhow::Result<String> {
+    bind_agent_in(&BOUND, who)
+}
+
+fn bind_agent_in(bound: &std::sync::OnceLock<String>, who: &str) -> anyhow::Result<String> {
+    let name = bound.get_or_init(|| who.to_string());
+    anyhow::ensure!(
+        name == who,
+        "this connection is agent {name:?}; it can't act as {who:?} (start another MCP server for another agent)"
+    );
+    Ok(name.clone())
+}
+
 fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Result<Value> {
     if name == "list_spaces" {
         return Ok(json!(agent::list(home)));
@@ -153,6 +213,8 @@ fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Resul
     let who = args["agent"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("agent is required"))?;
+    let who = bind_agent(who)?;
+    let who = who.as_str();
     let text = |k: &str| {
         args[k]
             .as_str()
@@ -345,4 +407,15 @@ pub fn run() -> anyhow::Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_connection_is_one_agent() {
+        let bound = std::sync::OnceLock::new();
+        assert_eq!(super::bind_agent_in(&bound, "A").unwrap(), "A");
+        assert_eq!(super::bind_agent_in(&bound, "A").unwrap(), "A");
+        assert!(super::bind_agent_in(&bound, "B").is_err());
+    }
 }

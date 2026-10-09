@@ -130,10 +130,12 @@ Item {
   }
 
   function act(name) {
+    if (name === "synced") { root.run([root.helper, "synced"]); root.dismiss(); return }
     var m = root.machines[root.selMachine]
     if (!m || m.here) return
     if (name === "watch") root.run([root.helper, "watch", m.name, String(root.selWs)])
     else if (name === "files") root.run([root.helper, "send-file", m.name])
+    else if (name === "get") root.run([root.helper, "get-file", m.name])
     else if (name === "sync") root.run([root.helper, "sync-folder", m.name])
     root.dismiss()
   }
@@ -273,7 +275,9 @@ Item {
           else if (event.key === Qt.Key_T) root.takeBack(root.selMachine, root.selWs)
           else if (event.key === Qt.Key_W) root.act("watch")
           else if (event.key === Qt.Key_F) root.act("files")
+          else if (event.key === Qt.Key_G) root.act("get")
           else if (event.key === Qt.Key_S) root.act("sync")
+          else if (event.key === Qt.Key_Y) root.act("synced")
           else return
           event.accepted = true
         }
@@ -335,7 +339,11 @@ Item {
                   }
                   Text {
                     textFormat: Text.PlainText
-                    text: tile.modelData.here ? "this machine" : (tile.modelData.error ? "not answering" : "on your tailnet")
+                    text: tile.modelData.here ? "this machine"
+                      : tile.modelData.error ? "not answering"
+                      : tile.modelData.sync_errors ? "sync failing (S to see)"
+                      : tile.modelData.synced ? (tile.modelData.synced === 1 ? "1 folder in sync" : tile.modelData.synced + " folders in sync")
+                      : "on your tailnet"
                     color: root.foreground
                     opacity: 0.6
                     font.family: root.fontFamily
@@ -419,7 +427,7 @@ Item {
         Text {
           textFormat: Text.PlainText
           visible: root.mode === "keyboard"
-          text: "←→ machine   1–9 workspace   ↵ give this workspace   T take back   W watch   F send files   S sync a folder   Esc"
+          text: "←→ machine   1–9 workspace   ↵ give   T take back   W watch   F send files   G get files   S sync a folder   Y synced folders   Esc"
           color: root.foreground
           opacity: 0.6
           font.family: root.fontFamily

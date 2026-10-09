@@ -43,8 +43,10 @@ const USAGE: &str = "omaspace — move Omarchy workspaces between your machines 
   omaspace restore <FILE | hub:ID>
   omaspace put <peer> <file|dir>... [--to ~/Downloads]   copy files to a machine
   omaspace get <peer> <path>... [--to .]                  copy files from a machine
-  omaspace ls <peer> [path]
-  omaspace sync <peer> <local dir> [remote dir] [--once]  two-way folder sync
+  omaspace ls <peer> [path] [--names]
+  omaspace sync add <peer> <folder> [remote folder]   keep a folder the same on both machines
+  omaspace sync list | remove <folder> [peer]          folders kept in sync; stop one
+  omaspace sync <peer> <folder> [remote folder] [--once]   sync in the foreground
   omaspace serve
   omaspace setup                               user service + Omarchy keybindings
   omaspace mcp                                 agent tools over stdio
@@ -96,12 +98,16 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
-        Some("serve") => server::serve(server::Daemon {
-            me: tailnet::me()?,
-            home: home()?,
-            stash: home()?.join(".local/state/omaspace/stash"),
-            desktop: hypr::available(),
-        }),
+        Some("serve") => {
+            // Folders kept in sync run here, so they survive a restart.
+            std::thread::spawn(sync::run_saved);
+            server::serve(server::Daemon {
+                me: tailnet::me()?,
+                home: home()?,
+                stash: home()?.join(".local/state/omaspace/stash"),
+                desktop: hypr::available(),
+            })
+        }
         Some("peers") => {
             for peer in client::peers()? {
                 println!(
@@ -196,8 +202,21 @@ fn main() -> anyhow::Result<()> {
         Some("get") => cmd_get(rest),
         Some("ls") => {
             let peer = rest.first().context("usage: omaspace ls <peer> [path]")?;
-            let path = rest.get(1).map(String::as_str).unwrap_or("~/Downloads");
+            let path = rest
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .map(String::as_str)
+                .unwrap_or("~/Downloads");
             let v = client::files_list(peer, path)?;
+            // `--names`: just the files, one per line (for scripts and menus).
+            if rest.iter().any(|a| a == "--names") {
+                for e in v["entries"].as_array().into_iter().flatten() {
+                    if e["dir"].as_bool() != Some(true) {
+                        println!("{}", e["name"].as_str().unwrap_or(""));
+                    }
+                }
+                return Ok(());
+            }
             println!("{}", v["path"].as_str().unwrap_or(path));
             for e in v["entries"].as_array().into_iter().flatten() {
                 let name = e["name"].as_str().unwrap_or("");

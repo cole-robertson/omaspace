@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.5 - 2026-10-08
+
+- **Folder sync is a real feature now.** `omaspace sync add <machine> <folder>`
+  keeps a folder the same on both machines in the background: the omaspace
+  service runs it, so it carries on after a restart, and retries with backoff
+  while the other machine is off. `omaspace sync list` shows each folder and
+  how it's doing, `omaspace sync remove` stops one (the files stay).
+- **Files everywhere you are.** The Omarchy menu adds *Get files from…* and
+  *Synced folders*; the Spaces panel shows how many folders each machine keeps
+  in sync with you (and if one is failing), with `G` to get files and `Y` for
+  synced folders; the live view's Files panel marks synced folders and shows
+  their status; agents get `list_files`, `send_file`, `get_file` and
+  `synced_folders`. `omaspace ls --names` prints plain file names for scripts.
+- **Easier install.** The README's commands always fetch the latest release,
+  and `omaspace setup` asks once to let Tailscale publish the live view
+  instead of telling you to run it yourself.
+- **Security:** at most 8 video encoders run at once, and stream widths snap
+  to a few sizes so viewers share them; request heads are capped in size and
+  time, and connections in number. Another machine's switcher only sees that
+  an agent needs you, not what it asked. A machine only accepts sign-ins for
+  sites open in the windows it's given. Each MCP connection is one agent, so
+  an agent can't act as another.
+
 ## 0.1.4 - 2026-10-08
 
 Security hardening before launch.

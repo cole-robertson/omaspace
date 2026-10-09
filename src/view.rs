@@ -154,12 +154,21 @@ pub fn serve() -> anyhow::Result<()> {
         shared.origin,
         socket.display()
     );
+    // One thread per connection, but not without bound.
+    let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming().flatten() {
-        let shared = shared.clone();
+        use std::sync::atomic::Ordering;
+        if open.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            drop(stream);
+            continue;
+        }
+        open.fetch_add(1, Ordering::Relaxed);
+        let (shared, open) = (shared.clone(), open.clone());
         std::thread::spawn(move || {
             if let Err(e) = handle(stream, shared) {
                 eprintln!("view: {e}");
             }
+            open.fetch_sub(1, Ordering::Relaxed);
         });
     }
     Ok(())
@@ -217,6 +226,12 @@ fn primary_output() -> anyhow::Result<(String, u32, u32)> {
     ))
 }
 
+/// Open connections at most (viewers, presence checks, uploads).
+const MAX_CONNECTIONS: usize = 64;
+
+/// The most a request head may take (request line and headers).
+const MAX_HEAD: u64 = 32 * 1024;
+
 /// A request head: method, path, lowercased headers, and any body bytes
 /// already read past it.
 type Head = (String, String, HashMap<String, String>, Vec<u8>);
@@ -224,7 +239,10 @@ type Head = (String, String, HashMap<String, String>, Vec<u8>);
 /// Read the HTTP request head. Returns any bytes already read past it (the
 /// start of a POST body sent in the same packet).
 fn read_head(stream: &mut UnixStream) -> anyhow::Result<Head> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // A slow or endless request head can't hold a thread or memory: the
+    // whole head must arrive within 10 s and fit in 32 KiB.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(std::io::Read::take(stream.try_clone()?, MAX_HEAD));
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -235,11 +253,15 @@ fn read_head(stream: &mut UnixStream) -> anyhow::Result<Head> {
     let mut headers = HashMap::new();
     loop {
         let mut h = String::new();
-        reader.read_line(&mut h)?;
+        anyhow::ensure!(
+            reader.read_line(&mut h)? > 0,
+            "request head too large or cut off"
+        );
         let h = h.trim_end();
         if h.is_empty() {
             break;
         }
+        anyhow::ensure!(headers.len() < 100, "too many headers");
         if let Some((k, v)) = h.split_once(':') {
             headers.insert(k.trim().to_lowercase(), v.trim().to_string());
         }
@@ -249,6 +271,7 @@ fn read_head(stream: &mut UnixStream) -> anyhow::Result<Head> {
         buffered.is_empty() || method == "POST" || method == "PUT",
         "unexpected pipelined data"
     );
+    stream.set_read_timeout(None)?;
     Ok((method, path, headers, buffered))
 }
 
@@ -539,6 +562,31 @@ fn handle(mut stream: UnixStream, shared: Arc<Shared>) -> anyhow::Result<()> {
             "application/json",
             machines(&shared).to_string().as_bytes(),
         ),
+        // Folders on this machine kept in sync with your others, for the
+        // Files panel: where each one is, with what, and how it's going.
+        ("GET", "/v1/view/synced") => {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
+            let list: Vec<Value> = crate::sync::folders()
+                .iter()
+                .map(|f| {
+                    let st = crate::sync::status(f);
+                    json!({
+                        "path": crate::snapshot::to_portable(&f.local, &home),
+                        "peer": f.peer, "remote": f.remote,
+                        "last_ok": st.last_ok, "error": st.last_error,
+                        "recent": st.recent.iter().take(5).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            http(
+                stream,
+                "200 OK",
+                "application/json",
+                json!({ "folders": list }).to_string().as_bytes(),
+            )
+        }
         // Who is here: humans watching and agents working (for the switcher).
         ("GET", "/v1/view/presence") => {
             let list = shared.participants.lock().unwrap();
@@ -548,7 +596,11 @@ fn handle(mut stream: UnixStream, shared: Arc<Shared>) -> anyhow::Result<()> {
                 .map(|p| p.name.clone())
                 .collect();
             let watching = list.values().filter(|p| p.kind == "human").count();
-            let reply = json!({"name": shared.me.name, "agents": agents, "watching": watching, "help": *shared.help.lock().unwrap()});
+            // Only *that* an agent needs you, not what it asked: the text can
+            // be sensitive (a 2FA prompt), and another machine's page doesn't
+            // need it to show the badge. The machine's own view shows it.
+            let needs = shared.help.lock().unwrap().is_some();
+            let reply = json!({"name": shared.me.name, "agents": agents, "watching": watching, "needs_you": needs});
             drop(list);
             let allow = headers
                 .get("origin")
@@ -977,12 +1029,26 @@ fn query(path: &str, key: &str) -> Option<String> {
 
 /// Choose the stream size for a viewer: the viewer's own pixel size capped at
 /// the monitor, even dimensions (H.264 needs them).
+/// The smallest standard width at least as wide as asked, capped at the
+/// screen's own width.
+fn stream_width(asked: u32, screen: u32) -> u32 {
+    const WIDTHS: [u32; 7] = [640, 960, 1280, 1600, 1920, 2560, 3840];
+    WIDTHS
+        .into_iter()
+        .find(|w| *w >= asked)
+        .unwrap_or(screen)
+        .min(screen)
+}
+
 fn source_for(shared: &Shared, path: &str, window: Option<&Value>) -> Source {
     let (output, mw, mh) = shared.output.clone();
-    let want_w: u32 = query(path, "w")
+    // A few fixed widths, not any number: each distinct width is its own
+    // encoder, and viewers of similar screens can share one.
+    let asked: u32 = query(path, "w")
         .and_then(|w| w.parse().ok())
         .unwrap_or(mw)
         .clamp(320, mw);
+    let want_w = stream_width(asked, mw);
     let region = window.map(|w| {
         let at = &w["at"];
         let size = &w["size"];

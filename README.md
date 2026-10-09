@@ -21,8 +21,10 @@ and give AI agents a workspace of their own next to yours.
   machine while you do it, and **Hand back** lets them carry on. Closing the
   view hands back too, so an agent is never left paused by a phone you put
   away.
-- **Files.** Copy files and folders between machines, or keep a folder in sync
-  both ways.
+- **Files and folder sync.** Copy files and folders between machines from the
+  command line, the Omarchy menu, the Spaces panel or your phone, and keep
+  folders the same on two machines, both ways, in the background. Everything
+  goes straight between your machines, never through a cloud.
 
 ![The live view in a laptop's browser](docs/screenshots/laptop.webp)
 
@@ -41,16 +43,18 @@ a *hub* that keeps snapshots for later.
 
 ## Install
 
-You need Omarchy and Tailscale. Download the latest
-[release](https://github.com/cole-robertson/omaspace/releases/latest)
-(x86_64 Linux):
+You need Omarchy and Tailscale, signed in to the same Tailscale account on
+each machine. Then, on each machine:
 
 ```sh
-curl -LO https://github.com/cole-robertson/omaspace/releases/latest/download/omaspace-0.1.4-x86_64-linux.tar.gz
-tar xzf omaspace-0.1.4-x86_64-linux.tar.gz
-install -m755 omaspace-0.1.4-x86_64-linux/omaspace ~/.local/bin/
+curl -fsSL https://github.com/cole-robertson/omaspace/releases/latest/download/omaspace-x86_64-linux.tar.gz | tar xz
+install -m755 omaspace-*-x86_64-linux/omaspace ~/.local/bin/
 omaspace setup
 ```
+
+`omaspace setup` asks for your password once, to let Tailscale publish the
+live view. When it's done, it prints your live view's address, and
+`omaspace peers` lists your other machines.
 
 Or build it from source with a Rust toolchain:
 
@@ -64,10 +68,8 @@ omaspace setup
 
 `omaspace setup` installs and starts the user services, publishes the live
 view on your tailnet, and adds the Omarchy keybindings, menu and Spaces panel.
-Publishing a unix socket with `tailscale serve` needs root or a Tailscale
-operator (`sudo tailscale set --operator=$USER`).
-
-Do the same on each machine. They find each other on your tailnet.
+Run it again any time; it only replaces what it installed. To update, repeat
+the three commands above.
 
 Agents using desktop apps (beyond their browser and terminal) also need the
 `omaspace-driver` package, which builds cua-driver with Omarchy patches:
@@ -80,9 +82,39 @@ omaspace peers                        # your machines running omaspace
 omaspace send laptop                  # give this workspace to "laptop"
 omaspace send laptop --with-files     # ...with its project folders
 omaspace pull desk --workspace 3      # take workspace 3 back from "desk"
-omaspace put laptop report.pdf        # into laptop's ~/Downloads
-omaspace sync laptop ~/notes          # keep a folder the same on both
 ```
+
+## Files and folder sync
+
+```sh
+omaspace put laptop report.pdf        # into laptop's ~/Downloads
+omaspace put laptop ~/photos --to ~/Pictures
+omaspace get laptop ~/Downloads/scan.pdf
+omaspace ls laptop ~/Documents
+
+omaspace sync add laptop ~/notes      # keep ~/notes the same on both, from now on
+omaspace sync list                    # what's in sync, and how it's going
+omaspace sync remove ~/notes          # stop (the files stay on both machines)
+```
+
+- **Copies are safe to interrupt.** A file arrives under a temporary name and
+  only gets its real name once its size and checksum match; an interrupted
+  copy resumes. Nothing is overwritten: a clash becomes `report (2).pdf`.
+- **Synced folders keep going.** The omaspace service syncs them every few
+  seconds, also after a restart, and retries when the other machine is off.
+  An edit, a new file or a deletion on either side goes to the other. If both
+  sides changed the same file, both are kept: theirs is saved beside yours as
+  `notes (conflict from laptop).md`. Hidden files, `.git`, `node_modules` and
+  `target` aren't synced.
+- **From Omarchy:** the Omarchy menu has *Send files to…*, *Get files from…*,
+  *Sync a folder with…* and *Synced folders*; in the Spaces panel, pick a
+  machine and press `F` (send), `G` (get), `S` (sync a folder) or `Y` (synced
+  folders). Each machine shows how many folders it keeps in sync with you.
+- **From your phone:** in the live view, **Files** browses that machine's home
+  folder, uploads and downloads, and marks the folders that are in sync.
+- **Agents** get `list_files`, `send_file`, `get_file` and `synced_folders`.
+- Files stay inside your home folder, out of hidden folders like `~/.ssh` and
+  out of files that tools run code from (`.git`, `.envrc`, …).
 
 From Omarchy: `SUPER+CTRL+SHIFT+O` opens the Spaces panel (give, take back,
 watch your machines), and so does dragging a window to the top edge with

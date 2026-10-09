@@ -77,11 +77,20 @@ pub fn spaces() -> anyhow::Result<Value> {
     let mut machines = vec![serde_json::json!({
         "name": me.name, "here": true, "workspaces": crate::hypr::workspaces_summary()?,
     })];
+    let synced = crate::sync::folders();
     for peer in peers()?.into_iter().filter(|p| p.desktop) {
-        let entry = match get(&peer.name, "/v1/workspaces") {
+        let mut entry = match get(&peer.name, "/v1/workspaces") {
             Ok(w) => serde_json::json!({"name": peer.name, "here": false, "workspaces": w}),
             Err(e) => serde_json::json!({"name": peer.name, "here": false, "error": e.to_string()}),
         };
+        // Folders kept in sync with this machine, and whether any is failing.
+        let mine: Vec<_> = synced.iter().filter(|f| f.peer == peer.name).collect();
+        entry["synced"] = serde_json::json!(mine.len());
+        entry["sync_errors"] = serde_json::json!(
+            mine.iter()
+                .filter(|f| crate::sync::status(f).last_error.is_some())
+                .count()
+        );
         machines.push(entry);
     }
     Ok(serde_json::json!({"machines": machines}))

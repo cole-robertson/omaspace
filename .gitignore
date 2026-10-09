@@ -10,3 +10,4 @@ pkg/omaspace-driver/plugin/
 
 # Demo/launch tooling lives outside the repo.
 /e2e/demo*
+/dist-out/
