@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.6 - 2026-10-08
+
+- **Tagged machines work from your phone after setup.** A machine owned by
+  a Tailscale tag trusts no person's devices until told; `omaspace setup` now
+  asks whose devices may use it and writes `~/.config/omaspace/owners`, and
+  a refused device is told why and how to fix it.
+- **`omaspace setup` installs what the phone view needs** (`wf-recorder`),
+  so a fresh machine's phone view is phone-shaped without a manual step.
+- **A screen that's off can't fool you.** When a machine idles, its display
+  powers off and the stream stops on the last picture, so a viewer could
+  type into a stale image without seeing anything happen. Now the view says
+  *The screen is off: this is the last picture* with a **Wake it** button;
+  any tap or key from a viewer also turns the screen back on (Hyprland
+  doesn't count input from virtual devices as activity), and opening the
+  view does too.
+- **The recorder's errors are in the view's log** instead of discarded, so a
+  stream that won't start says why.
+- **MCP tools that return a list work with strict clients**
+  (`structuredContent` is always an object; a list goes under `items`).
+- `omaspace sync add` records the first pass, so `sync list` shows it at once.
+- The end-to-end suite refuses a locked machine and keeps screens awake.
+
 ## 0.1.5 - 2026-10-08
 
 - **Folder sync is a real feature now.** `omaspace sync add <machine> <folder>`

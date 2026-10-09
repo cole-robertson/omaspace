@@ -382,7 +382,14 @@ pub fn run() -> anyhow::Result<()> {
                 &message["params"]["arguments"],
             ) {
                 Ok(value) => {
-                    json!({"content": [{"type": "text", "text": value.to_string()}], "structuredContent": value})
+                    // MCP requires structuredContent to be an object: a list
+                    // (list_peers, list_spaces, …) goes under "items".
+                    let structured = if value.is_object() {
+                        value.clone()
+                    } else {
+                        json!({ "items": value })
+                    };
+                    json!({"content": [{"type": "text", "text": value.to_string()}], "structuredContent": structured})
                 }
                 Err(e) => {
                     json!({"content": [{"type": "text", "text": e.to_string()}], "isError": true})

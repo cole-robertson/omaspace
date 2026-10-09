@@ -185,6 +185,10 @@
   #files .row { display:flex; align-items:center; gap:8px; padding:8px 4px; border-bottom:1px solid var(--line); }
   #files .row .n { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #files .row .s { color:var(--dim); font-size:11px; }
+  #asleep { position:absolute; left:50%; top:12px; transform:translateX(-50%); z-index:6; display:none; align-items:center; gap:8px;
+    background:var(--panel); border:1px solid var(--accent); border-radius:10px; padding:6px 8px 6px 12px; max-width:calc(100% - 24px); }
+  #asleep.on { display:flex; }
+  #asleep span:not(.i) { font-size:13px; }
   #files .row.sync { color:var(--accent); font-size:12px; }
   #files .row.sync.bad { color:#f7768e; }
   #files a { color:var(--accent); text-decoration:none; }
@@ -260,6 +264,7 @@
   <div id="tile-hint"></div>
   <div id="banner"><span id="banner-text"></span><button class="primary" id="takeover">Take over</button><button id="dismiss">Later</button></div>
   <div id="control"><span class="i">󰍽</span><span id="control-text"></span><button class="primary" id="handback">Hand back</button></div>
+  <div id="asleep"><span class="i">󰤄</span><span>The screen is off: this is the last picture.</span><button class="primary" id="wake-btn">Wake it</button></div>
   <aside id="panel"></aside>
   <div id="files"><div class="head"><b id="files-path">~/Downloads</b><span class="spacer"></span><button id="upload-btn">Upload</button><button id="files-close">✕</button></div><div id="files-list"></div></div>
   <div id="drop">Drop to send to this machine's Downloads</div>
@@ -428,6 +433,7 @@ setInterval(() => {
 // ---- state: Omarchy workspaces, windows, people ----------------------------
 function onText(m) {
   if (m.type === "hello") { me = m.id; myName = m.me; stream = m.stream; outputSize = m.output || outputSize; $("host").textContent = location.hostname.split(".")[0]; }
+  if (m.type === "state") $("asleep").classList.toggle("on", !!m.screen_off);
   if (m.type === "state") {
     // A swap we just sent may not be in this state yet (it was taken before
     // Hyprland moved the windows): keep showing the swap until it is, or
@@ -675,11 +681,11 @@ const pos = e => streamPos(e.clientX, e.clientY);
 // Mouse / pen: direct pointer (desktop browsers).
 stageEl.addEventListener("pointermove", e => { if (e.pointerType !== "touch") send({ type: "pointer", ...pos(e) }); });
 stageEl.addEventListener("pointerdown", e => {
-  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #control, #files, #machines")) return;
+  if (e.pointerType === "touch" || e.target.closest("#zoom, aside, #banner, #control, #asleep, #files, #machines")) return;
   canvas.focus(); stageEl.setPointerCapture(e.pointerId);
   send({ type: "pointer", ...pos(e), button: e.button, down: true }); e.preventDefault();
 });
-stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #control, #files, #machines")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
+stageEl.addEventListener("pointerup", e => { if (e.pointerType !== "touch" && !e.target.closest("#zoom, aside, #banner, #control, #asleep, #files, #machines")) send({ type: "pointer", ...pos(e), button: e.button, down: false }); });
 stageEl.addEventListener("contextmenu", e => e.preventDefault());
 stageEl.addEventListener("wheel", e => {
   e.preventDefault();
@@ -917,7 +923,7 @@ function swipeEnd(dir) {
 }
 let lastSwipe = null;
 stageEl.addEventListener("touchstart", e => {
-  if (e.target.closest("#zoom, aside, #banner, #control, #files, #agent-bar, #machines")) return;
+  if (e.target.closest("#zoom, aside, #banner, #control, #asleep, #files, #agent-bar, #machines")) return;
   if (lifted && !e.touches[1]) { drop(); e.preventDefault(); gesture = null; return; }
   e.preventDefault();
   for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
@@ -1216,6 +1222,7 @@ $("takeover").onclick = () => {
 };
 $("dismiss").onclick = () => $("banner").classList.remove("on");
 $("handback").onclick = () => send({ type: "hand_back" });
+$("wake-btn").onclick = () => { send({ type: "wake" }); $("asleep").classList.remove("on"); };
 
 // ---- arrow pad ------------------------------------------------------------
 // Tap: one arrow toward the side you tapped. Hold and slide: the arrow in

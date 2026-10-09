@@ -35,6 +35,10 @@ bin/omaspace-e2e view                                     # one spec file
 bin/omaspace-e2e -g "security"                            # Playwright flags pass through
 ```
 
+Unlock the machines first: the suite refuses a locked one, and turns on
+Omarchy's *Stay Awake* so a screen doesn't switch off mid-run (turn it back
+off from the bar afterwards).
+
 The tests use workspaces 5 to 9 on the machines and close every window on
 some of them first, so run them on a machine you aren't working on, or keep
 your windows on workspaces 1 to 4. The agent tests restart the desk's

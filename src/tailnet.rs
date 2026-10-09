@@ -206,12 +206,32 @@ pub fn trusted_with(me: &Identity, caller: &Identity, owners: &[String]) -> bool
         && owners.iter().any(|o| o.eq_ignore_ascii_case(&caller.login))
 }
 
-/// Logins (one per line, `#` comments) trusted as this machine's owners.
-pub fn owners() -> Vec<String> {
-    let path = std::env::var_os("XDG_CONFIG_HOME")
+/// Where the owners list lives: `~/.config/omaspace/owners`.
+pub fn owners_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-        .map(|d| d.join("omaspace/owners"));
+        .map(|d| d.join("omaspace/owners"))
+}
+
+/// The people (real logins, not tagged devices) on this tailnet.
+pub fn people() -> anyhow::Result<Vec<String>> {
+    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let mut out: Vec<String> = s
+        .users
+        .unwrap_or_default()
+        .into_values()
+        .map(|p| p.login)
+        .filter(|l| l.contains('@') && !l.ends_with(".ts.net"))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Logins (one per line, `#` comments) trusted as this machine's owners.
+pub fn owners() -> Vec<String> {
+    let path = owners_path();
     path.and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default()
         .lines()

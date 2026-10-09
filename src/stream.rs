@@ -185,11 +185,26 @@ impl Capture {
     }
 
     fn spawn(source: &Source) -> anyhow::Result<Child> {
-        Ok(Command::new(source.program())
+        let mut child = Command::new(source.program())
             .args(source.args())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?)
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Keep the recorder's own error lines (not its per-second chatter)
+        // in the view's log, so a capture that won't start says why.
+        if let Some(err) = child.stderr.take() {
+            let program = source.program();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+                    let l = line.to_ascii_lowercase();
+                    if l.contains("error") || l.contains("failed") || l.contains("unable") {
+                        eprintln!("view: {program}: {line}");
+                    }
+                }
+            });
+        }
+        Ok(child)
     }
 
     /// Demux one recorder's output until it ends.

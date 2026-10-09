@@ -130,6 +130,23 @@ pub fn serve() -> anyhow::Result<()> {
             sweep_orphan_phone_screens(&orphans, &mut seen);
         }
     });
+    // Hyprland sends no event when a screen powers off or on: check, and
+    // tell viewers, so the page can say the picture is stale.
+    let screens = shared.clone();
+    std::thread::spawn(move || {
+        let mut was = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if screens.outboxes.lock().unwrap().is_empty() {
+                continue;
+            }
+            let off = screens_off();
+            if off != was {
+                was = off;
+                broadcast(&screens, json!({"type": "state_changed"}));
+            }
+        }
+    });
     // Expire agent cursors that stopped reporting.
     let sweep = shared.clone();
     std::thread::spawn(move || {
@@ -282,12 +299,25 @@ fn read_head(stream: &mut UnixStream) -> anyhow::Result<Head> {
 fn caller(headers: &HashMap<String, String>, me: &Identity) -> anyhow::Result<Identity> {
     let ip = forwarded_ip(headers)?;
     let id = tailnet::whois(&format!("{ip}:1"))?;
-    anyhow::ensure!(
-        tailnet::trusted(me, &id),
-        "{} is not one of your devices",
-        id.name
-    );
+    anyhow::ensure!(tailnet::trusted(me, &id), "{}", refusal(me, &id));
     Ok(id)
+}
+
+/// Why a device was refused, and what to do about it if it's yours.
+fn refusal(me: &Identity, id: &Identity) -> String {
+    if !me.tags.is_empty() && id.tags.is_empty() && !id.login.is_empty() {
+        // A tagged machine doesn't belong to a person, so it can't tell that
+        // this phone or laptop is yours without being told.
+        return format!(
+            "{} ({}) is not one of this machine's owners.\n\nThis machine is tagged in Tailscale ({}), so it only trusts devices you list. If this is your device, on {} run:\n\n  omaspace setup\n\nand add {} as an owner, or add it to ~/.config/omaspace/owners.",
+            id.name,
+            id.login,
+            me.tags.join(", "),
+            me.name,
+            id.login
+        );
+    }
+    format!("{} is not one of your devices", id.name)
 }
 
 fn http(mut stream: UnixStream, status: &str, ctype: &str, body: &[u8]) -> anyhow::Result<()> {
@@ -926,6 +956,8 @@ fn state_for(output: Option<&str>) -> Value {
     json!({
         "type": "state",
         "origin": origin,
+        // The machine's screens are off (it idled): the picture is stale.
+        "screen_off": screens_off(),
         // Agent spaces on this machine: which workspace is whose, what it's
         // doing, whether it's waiting for you.
         "agents": std::env::var_os("HOME").map(|h| crate::agent::list(std::path::Path::new(&h))).unwrap_or_default().iter().map(|a| json!({
@@ -1171,6 +1203,10 @@ fn viewer(
         }
         None => source_for(&shared, path, window.as_ref()),
     };
+    // A powered-off screen (the machine idled) gives the recorder nothing to
+    // capture, and the viewer would see black: someone watching is activity,
+    // so turn the screens on. A lock screen stays up and is what they see.
+    wake_screens();
     let capture = match shared.captures.get(&source) {
         Ok(c) => c,
         Err(e) => {
@@ -1678,10 +1714,46 @@ fn set_control(shared: &Shared, by: Option<(&str, u64)>) {
     );
 }
 
+/// Turn every screen on. Input from virtual devices (ours) doesn't count as
+/// activity for Hyprland's own wake-on-input, so a screen that idled off
+/// would stay off, and the viewer would keep seeing the last frame from
+/// before it went dark, with nothing they do appearing to land.
+fn wake_screens() {
+    lua_dispatch("hl.dsp.dpms({ action = \"on\" })");
+}
+
+/// Screens off (the machine idled), checked at most every 2 s.
+fn screens_off() -> bool {
+    static LAST: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((at, off)) = *last
+        && at.elapsed() < std::time::Duration::from_secs(2)
+    {
+        return off;
+    }
+    let off = hypr::monitors_all()
+        .ok()
+        .and_then(|m| m.as_array().cloned())
+        .is_some_and(|list| {
+            list.iter()
+                .filter(|m| m["disabled"] != true)
+                .any(|m| m["dpmsStatus"] == false)
+        });
+    *last = Some((std::time::Instant::now(), off));
+    off
+}
+
 fn on_message(shared: &Shared, id: u64, name: &str, msg: &Value) {
     let addr =
         |m: &Value| hypr::lua_string(&format!("address:{}", m["address"].as_str().unwrap_or("")));
-    match msg["type"].as_str().unwrap_or("") {
+    let kind = msg["type"].as_str().unwrap_or("");
+    // Any input means someone is here: a screen that went dark comes back.
+    if kind == "wake" || (matches!(kind, "pointer" | "key" | "combo" | "scroll") && screens_off()) {
+        wake_screens();
+        broadcast(shared, json!({"type": "state_changed"}));
+    }
+    match kind {
+        "wake" => {}
         "pointer" => {
             let (x, y) = (
                 msg["x"].as_f64().unwrap_or(0.0),

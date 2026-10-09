@@ -161,6 +161,17 @@ export class Machine {
   /** Tailscale IPv4 of this machine. */
   ip() { return this.sh("tailscale ip -4 | head -1"); }
 
+  /** Refuse a locked machine (the tests would type into its lock screen and
+   *  count as failed unlocks), and keep its screen on and awake for the run:
+   *  a screen that's off gives the live view nothing to stream. */
+  ready() {
+    if (this._ready) return;
+    const locked = this.sh("omarchy-shell lock isLocked 2>/dev/null || echo false", { check: false }).trim();
+    if (locked === "true") throw new Error(`${this.name} is locked: unlock it before running the tests`);
+    this.sh(`omarchy-toggle-idle --status | grep -q '"enabled":true' || omarchy-toggle-idle stay-awake; hyprctl dispatch 'hl.dsp.dpms({ action = "on" })' >/dev/null`, { check: false });
+    this._ready = true;
+  }
+
   /** HTTPS base of this machine's live view (tailscale serve :7788). */
   viewUrl() { return `https://${this.name}.${tailnetDomain()}:7788`; }
 

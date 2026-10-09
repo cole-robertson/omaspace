@@ -33,7 +33,103 @@ hl.window_rule({ match = { class = "^(omaspace-agent)$" }, suppress_event = "act
 hl.window_rule({ match = { class = "^(omaspace-agent-term)$" }, suppress_event = "activate activatefocus" })
 "#;
 
+/// Packages the live view needs: wf-recorder streams a phone-shaped screen
+/// (gpu-screen-recorder, which streams the desktop, ships with Omarchy).
+const PACKAGES: &[&str] = &["wf-recorder"];
+
+/// Install missing packages with Omarchy's own helper (one sudo prompt).
+fn install_packages() {
+    let missing: Vec<&str> = PACKAGES
+        .iter()
+        .copied()
+        .filter(|p| crate::omarchy::which(p).is_none())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    println!("installing {} (for the phone view)", missing.join(", "));
+    let ok = Command::new("omarchy-pkg-add")
+        .args(&missing)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        println!(
+            "couldn't install {}: phones will see the whole desktop instead of a phone-shaped screen (install it with: sudo pacman -S {})",
+            missing.join(", "),
+            missing.join(" ")
+        );
+    }
+}
+
+/// A tagged machine belongs to no person, so it trusts only devices with
+/// its tags until told who its owners are. Offer the people on the tailnet.
+fn owners_for_tagged_machine() -> anyhow::Result<()> {
+    let me = crate::tailnet::me()?;
+    if me.tags.is_empty() || !crate::tailnet::owners().is_empty() {
+        return Ok(());
+    }
+    let people = crate::tailnet::people().unwrap_or_default();
+    let Some(path) = crate::tailnet::owners_path() else {
+        return Ok(());
+    };
+    println!(
+        "this machine is tagged in Tailscale ({}), so your phone and laptops can't use it until you say they're yours",
+        me.tags.join(", ")
+    );
+    let pick = match people.as_slice() {
+        [] => None,
+        [one] => ask(&format!("trust devices signed in as {one}? [Y/n] "))
+            .is_some_and(|a| a.is_empty() || a.starts_with(['y', 'Y']))
+            .then(|| one.clone()),
+        many => {
+            for (i, p) in many.iter().enumerate() {
+                println!("  {}) {p}", i + 1);
+            }
+            ask("whose devices may use this machine? (number, or Enter to skip) ")
+                .and_then(|a| a.parse::<usize>().ok())
+                .and_then(|n| many.get(n.wrapping_sub(1)).cloned())
+        }
+    };
+    match pick {
+        Some(login) => {
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(
+                &path,
+                format!(
+                    "# Tailscale logins whose personal devices (phone, laptops) may use omaspace here.\n{login}\n"
+                ),
+            )?;
+            println!(
+                "devices signed in as {login} can use this machine ({})",
+                path.display()
+            );
+        }
+        None => println!(
+            "skipped: add your Tailscale login to {} to use this machine from your phone",
+            path.display()
+        ),
+    }
+    Ok(())
+}
+
+/// A line from the terminal, if there is one (setup can run unattended).
+fn ask(prompt: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    print!("{prompt}");
+    std::io::stdout().flush().ok()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok()?;
+    Some(line.trim().to_string())
+}
+
 pub fn run(home: &Path) -> anyhow::Result<()> {
+    install_packages();
+    if let Err(e) = owners_for_tagged_machine() {
+        println!("couldn't check this machine's Tailscale owners: {e}");
+    }
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin)?;
     let launcher = bin.join("omarchy-omaspace");

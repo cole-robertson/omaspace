@@ -56,6 +56,10 @@ omaspace setup
 live view. When it's done, it prints your live view's address, and
 `omaspace peers` lists your other machines.
 
+If a machine is *tagged* in Tailscale (owned by a tag rather than by you),
+setup asks whose devices may use it, so your phone and laptops are trusted
+there; that list lives in `~/.config/omaspace/owners`.
+
 Or build it from source with a Rust toolchain:
 
 ```sh

@@ -26,12 +26,14 @@ export const test = base.extend({
   desk: async ({}, use) => {
     if (!DESK) throw new Error("set OMASPACE_E2E_DESK to the tailnet hostname of the Omarchy machine to test (see e2e/README.md)");
     const m = new Machine(DESK);
+    m.ready();
     await use(m);
     await m.cleanup();
   },
   peer: async ({}, use, info) => {
     info.skip(!PEER, "needs a second machine: set OMASPACE_E2E_PEER");
     const m = new Machine(PEER);
+    m.ready();
     await use(m);
     await m.cleanup();
   },
