@@ -1,6 +1,7 @@
 // Add to home screen, and switching between your machines.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import { isPhoneScreen } from "../lib/machine.js";
 
 test("installable: manifest, theme colors, and icons that render", async ({ desk, phone }) => {
   const view = await phone.open(desk, {});
@@ -38,7 +39,7 @@ test("when the view changes shape (home-screen app, rotation) the phone's screen
   const page = view.page;
   // Other phones may be watching too: find this page's screen by its size.
   const shape = () => page.evaluate(() => phoneShape.split("x").map(Number));
-  const mine = async () => { const [w, h] = await shape(); return desk.monitors().find(m => m.name.startsWith("OSP-PHONE") && Math.abs(m.height - h) < 8 && Math.abs(m.width - w) < 8); };
+  const mine = async () => { const [w, h] = await shape(); return desk.monitors().find(m => isPhoneScreen(m) && Math.abs(m.height - h) < 8 && Math.abs(m.width - w) < 8); };
   const first = await waitFor(mine, "phone screen");
   // A home-screen app is taller than a Safari tab.
   const vp = page.viewportSize();

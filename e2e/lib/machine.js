@@ -7,6 +7,10 @@ import { hostname } from "node:os";
 
 const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(for s in $(ls -t /run/user/$(id -u)/hypr/); do HYPRLAND_INSTANCE_SIGNATURE=$s timeout 2 hyprctl -j version >/dev/null 2>&1 && { echo $s; break; }; done) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && readlink -f ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
 
+/** A phone-shaped screen made for a viewer: omaspace's own (OSP-PHONE-…) or
+ *  gliff's headless one (gliff-…). */
+export const isPhoneScreen = m => /^(OSP-PHONE|gliff-)/.test(m.name);
+
 export class Machine {
   /** @param {string} name tailnet hostname, e.g. "peer" */
   constructor(name) {
@@ -144,7 +148,7 @@ export class Machine {
   spacesState() { return JSON.parse(this.spaces("debugState")); }
 
   /** Pixel size of the primary monitor. */
-  screen() { const m = this.monitors().find(m => !m.name.startsWith("OSP-")); return [m.width, m.height]; }
+  screen() { const m = this.monitors().find(m => !isPhoneScreen(m)); return [m.width, m.height]; }
 
   /** Call one omaspace MCP tool on this machine (a fresh stdio server). */
   mcp(tool, args) {

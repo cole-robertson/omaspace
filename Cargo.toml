@@ -30,6 +30,9 @@ tungstenite = "0.29"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# gliff's wire protocol: omaspace's live view streams through gliff-server.
+gliff-proto = { git = "https://github.com/omacom/gliff", tag = "v0.3.0" }
+minicbor = { version = "2", features = ["alloc"] }
 
 
 [profile.release]

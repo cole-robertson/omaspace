@@ -52,6 +52,10 @@
 
   main { position:relative; overflow:hidden; touch-action:none; background:#000; }
   canvas#screen { position:absolute; left:0; top:0; transform-origin:0 0; background:#000; outline:none; image-rendering:auto; }
+  /* Full-colour (4:4:4) picture drawn with WebGL, laid exactly over #screen;
+     taps and clicks go through to #screen underneath. */
+  canvas#screen444 { position:absolute; left:0; top:0; transform-origin:0 0; pointer-events:none; display:none; }
+  canvas#screen444.on { display:block; }
   #zoom { position:absolute; right:8px; bottom:8px; display:flex; gap:4px; opacity:.55; transition:opacity .2s; }
   #zoom:hover, #zoom:active { opacity:1; }
   #zoom button { color:var(--fg); background:color-mix(in srgb, var(--panel) 85%, transparent); width:36px; height:36px; backdrop-filter:blur(6px); }
@@ -254,6 +258,7 @@
 </header>
 <main id="stage">
   <canvas id="screen" tabindex="0"></canvas>
+  <canvas id="screen444" aria-hidden="true"></canvas>
   <div id="zoom"><button id="zoom-out" title="Zoom out">−</button><button id="zoom-fit" title="Fit / readable">⤢</button><button id="zoom-in" title="Zoom in">+</button></div>
   <div id="cursors"></div>
   <div id="swipe-peek"></div>
@@ -344,6 +349,11 @@ function connect() {
     if (ws0) q.set("workspace", String(ws0));
   }
   if (params.get("window")) q.set("window", params.get("window"));
+  // gliff stream options: full colour (sharp text) where WebGL2 can recombine
+  // it, unless asked for low bandwidth; ?chroma=420 or ?low=1 override.
+  const want444 = params.get("chroma") === "444" || (params.get("chroma") !== "420" && !phoneMode() && !!document.createElement("canvas").getContext("webgl2"));
+  if (want444 && !params.get("low")) q.set("chroma", "444");
+  if (params.get("low")) q.set("low", "1");
   ws = new WebSocket(`wss://${location.host}/ws?${q}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
@@ -366,7 +376,12 @@ let linkState = "";
 function setLink(st) { linkState = st; const d = document.querySelector("#people .dot"); if (d) d.className = "dot " + st; else $("people").innerHTML = `<span class="dot ${st}"></span>`; }
 
 // ---- video: WebCodecs H.264 ------------------------------------------------
-function resetDecoder() { try { decoder && decoder.close(); } catch {} decoder = null; configured = false; configuring = false; }
+function resetDecoder() {
+  try { decoder && decoder.close(); } catch {} decoder = null; configured = false; configuring = false;
+  try { auxDecoder && auxDecoder.close(); } catch {} auxDecoder = null;
+  for (const f of [...pendingMain.values(), ...pendingAux.values()]) f.close();
+  pendingMain.clear(); pendingAux.clear();
+}
 function avcCodec(au) {
   // avc1.PPCCLL from the SPS (NAL type 7) in a keyframe.
   for (let i = 0; i + 4 < au.length; i++) {
@@ -377,15 +392,141 @@ function avcCodec(au) {
   }
   return "avc1.640028";
 }
+// gliff's stream config: size and whether the colour comes as two streams
+// (4:4:4 split into a main and an aux 4:2:0 stream, recombined here).
+let dual = false, auxDecoder = null, auxFrame = null, mainFrame = null, engine = "";
 function onFrame(buf) {
+  if (buf[0] === 2) {
+    const dv = new DataView(buf.buffer, buf.byteOffset);
+    const wantDual = buf[9] === 1;
+    if (wantDual !== dual) { dual = wantDual; resetDecoder(); if (!dual) $("screen444").classList.remove("on"); }
+    return;
+  }
+  // gliff frame: 0x03 | key | pts | u32 main_len | main | aux
+  if (buf[0] === 3) {
+    const dv = new DataView(buf.buffer, buf.byteOffset);
+    const mainLen = dv.getUint32(10);
+    const main = buf.subarray(14, 14 + mainLen), aux = buf.subarray(14 + mainLen);
+    if (dual && aux.length) decodeAux(buf[1] === 1, Number(dv.getBigUint64(2)), aux);
+    return onVideo(buf[1] === 1, Number(dv.getBigUint64(2)), main, buf.length);
+  }
   if (buf[0] !== 1) return;
-  const key = buf[1] === 1;
-  const pts = Number(new DataView(buf.buffer, buf.byteOffset + 2, 8).getBigUint64(0));
-  const data = buf.subarray(10);
+  onVideo(buf[1] === 1, Number(new DataView(buf.buffer, buf.byteOffset + 2, 8).getBigUint64(0)), buf.subarray(10), buf.length);
+}
+// ---- 4:4:4 (AVC444 as gliff sends it) ---------------------------------------
+// The main stream is ordinary 4:2:0; the aux stream carries the chroma the main
+// one dropped (its Y plane: odd rows of U, then of V; its UV: odd columns).
+// Both decode in the browser's own (hardware) H.264 decoder; the planes are
+// read back as NV12 and recombined into full-resolution colour on the GPU,
+// converting BT.709 limited range to RGB, exactly like gliff's own client.
+let gl = null, glProg = null, glTex = {}, glCanvas = null;
+const pendingAux = new Map(), pendingMain = new Map();
+function decodeAux(key, pts, data) {
+  if (!auxDecoder) {
+    auxDecoder = new VideoDecoder({
+      output: f => { pendingAux.set(f.timestamp, f); tryRecombine(f.timestamp); },
+      error: () => { auxDecoder = null; },
+    });
+    auxDecoder.configured = false;
+  }
+  if (!auxDecoder.configured) {
+    if (!key) return;
+    auxDecoder.configure({ codec: avcCodec(data), optimizeForLatency: true });
+    auxDecoder.configured = true;
+  }
+  auxDecoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data }));
+}
+/** The decoded planes as Y plus separate U and V (whatever layout the browser
+ *  decoded to: I420, or NV12 split here). Sizes are the visible area. */
+async function planes(frame) {
+  const w = frame.visibleRect?.width || frame.codedWidth, h = frame.visibleRect?.height || frame.codedHeight;
+  const buf = new Uint8Array(frame.allocationSize());
+  const l = await frame.copyTo(buf).catch(() => null);
+  if (!l) return null;
+  if (frame.format === "I420" || frame.format === "I420A") {
+    return { w, h, y: buf.subarray(l[0].offset), ys: l[0].stride, u: buf.subarray(l[1].offset), us: l[1].stride, v: buf.subarray(l[2].offset), vs: l[2].stride };
+  }
+  if (frame.format === "NV12") {
+    // Split the interleaved UV plane into U and V.
+    const cw = w / 2, ch = h / 2, uv = buf.subarray(l[1].offset), u = new Uint8Array(cw * ch), v = new Uint8Array(cw * ch);
+    for (let r = 0; r < ch; r++) for (let c = 0; c < cw; c++) { u[r * cw + c] = uv[r * l[1].stride + 2 * c]; v[r * cw + c] = uv[r * l[1].stride + 2 * c + 1]; }
+    return { w, h, y: buf.subarray(l[0].offset), ys: l[0].stride, u, us: cw, v, vs: cw };
+  }
+  return null;
+}
+function glSetup(w, h) {
+  if (!gl) {
+    glCanvas = $("screen444");
+    gl = glCanvas.getContext("webgl2", { preserveDrawingBuffer: false });
+    if (!gl) return false;
+    const vs = `#version 300 es
+in vec2 p; out vec2 t; void main(){ t = vec2((p.x+1.)/2., 1.-(p.y+1.)/2.); gl_Position = vec4(p,0.,1.); }`;
+    const fs = `#version 300 es
+precision highp float; precision highp usampler2D;
+in vec2 t; out vec4 o;
+uniform usampler2D mY, mU, mV, aY, aU, aV; uniform vec2 size;
+void main(){
+  ivec2 px = ivec2(t * size);
+  int x = px.x, y = px.y, hh = int(size.y) / 2;
+  float Y = float(texelFetch(mY, px, 0).r);
+  float U, V;
+  if ((y & 1) == 0) {
+    ivec2 c = ivec2(x/2, y/2);
+    U = float((x & 1) == 0 ? texelFetch(mU, c, 0).r : texelFetch(aU, c, 0).r);
+    V = float((x & 1) == 0 ? texelFetch(mV, c, 0).r : texelFetch(aV, c, 0).r);
+  } else {
+    U = float(texelFetch(aY, ivec2(x, y/2), 0).r); V = float(texelFetch(aY, ivec2(x, hh + y/2), 0).r);
+  }
+  // BT.709 limited range to RGB.
+  float c = (Y - 16.) * 1.164383, d = U - 128., e = V - 128.;
+  o = vec4(clamp(vec3(c + 1.792741*e, c - 0.213249*d - 0.532909*e, c + 2.112402*d) / 255., 0., 1.), 1.);
+}`;
+    const sh = (type, src) => { const x = gl.createShader(type); gl.shaderSource(x, src); gl.compileShader(x); return x; };
+    glProg = gl.createProgram();
+    gl.attachShader(glProg, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(glProg, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(glProg); gl.useProgram(glProg);
+    const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(glProg, "p"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    ["mY", "mU", "mV", "aY", "aU", "aV"].forEach((n, i) => { glTex[n] = gl.createTexture(); gl.uniform1i(gl.getUniformLocation(glProg, n), i); });
+  }
+  // #screen keeps the size (input, outlines and zoom use it); #screen444 shows.
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; fit(); }
+  if (glCanvas.width !== w || glCanvas.height !== h) { glCanvas.width = w; glCanvas.height = h; applyView(); }
+  glCanvas.classList.add("on");
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(gl.getUniformLocation(glProg, "size"), w, h);
+  return true;
+}
+function uploadPlane(i, name, data, w, h, stride) {
+  gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, glTex[name]);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.pixelStorei(gl.UNPACK_ROW_LENGTH, stride);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, w, h, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, data);
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+}
+async function tryRecombine(ts) {
+  const m = pendingMain.get(ts), a = pendingAux.get(ts);
+  if (!m || !a) return;
+  pendingMain.delete(ts); pendingAux.delete(ts);
+  // Frames older than this one won't find a partner now.
+  for (const [k, f] of [...pendingMain]) if (k < ts) { f.close(); pendingMain.delete(k); }
+  for (const [k, f] of [...pendingAux]) if (k < ts) { f.close(); pendingAux.delete(k); }
+  const [M, A] = await Promise.all([planes(m), planes(a)]);
+  m.close(); a.close();
+  if (!M || !A || !glSetup(M.w, M.h)) { dual = false; return; }
+  const cw = M.w / 2, ch = M.h / 2;
+  uploadPlane(0, "mY", M.y, M.w, M.h, M.ys); uploadPlane(1, "mU", M.u, cw, ch, M.us); uploadPlane(2, "mV", M.v, cw, ch, M.vs);
+  uploadPlane(3, "aY", A.y, A.w, A.h, A.ys); uploadPlane(4, "aU", A.u, cw, ch, A.us); uploadPlane(5, "aV", A.v, cw, ch, A.vs);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  decoded++;
+}
+function onVideo(key, pts, data, size) {
+  const buf = { length: size };
   bytes += buf.length; frames++;
   if (!decoder) {
     decoder = new VideoDecoder({
       output: f => {
+        if (dual) { pendingMain.set(f.timestamp, f); tryRecombine(f.timestamp); return; }
         decoded++;
         // A new shape (a reshaped phone screen keeps its width but not its
         // height): resize the canvas and fit again.
@@ -411,7 +552,11 @@ function onFrame(buf) {
         if ((await VideoDecoder.isConfigSupported(cfg)).supported) { decoder.configure(cfg); configured = true; hwMode = hardwareAcceleration; break; }
       }
       configuring = false;
-      if (!configured) $("status").textContent = "this browser can't decode " + codec;
+      if (!configured) { $("status").textContent = "this browser can't decode " + codec; return; }
+      // Decode the keyframe that configured it: every frame after it builds on
+      // that picture, and a decoder that never saw it rejects them all until
+      // the next keyframe (gliff sends those rarely, on purpose).
+      decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: pts, data }));
     })();
     return;
   }
@@ -420,7 +565,12 @@ function onFrame(buf) {
   // blocks). So once anything is dropped, decode nothing until the next
   // keyframe (at most 0.5s away); the last good picture stays up meanwhile.
   if (needKey && !key) return;
-  if (decoder.decodeQueueSize > 3 && !key) { needKey = true; dropped++; return; }
+  if (decoder.state !== "configured") return;
+  if (decoder.decodeQueueSize > 3 && !key) {
+    // gliff sends keyframes only when asked: ask, once per gap.
+    if (!needKey && engine === "gliff") send({ type: "keyframe" });
+    needKey = true; dropped++; return;
+  }
   needKey = false;
   decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data }));
 }
@@ -432,6 +582,7 @@ setInterval(() => {
 
 // ---- state: Omarchy workspaces, windows, people ----------------------------
 function onText(m) {
+  if (m.type === "hello") engine = m.engine || "";
   if (m.type === "hello") { me = m.id; myName = m.me; stream = m.stream; outputSize = m.output || outputSize; $("host").textContent = location.hostname.split(".")[0]; }
   if (m.type === "state") $("asleep").classList.toggle("on", !!m.screen_off);
   if (m.type === "state") {
@@ -455,6 +606,14 @@ function onText(m) {
   if (m.type === "cursors") renderCursors(m.participants);
   if (m.type === "toast") toast(m.text, 4000);
   if (m.type === "help") { $("banner-text").textContent = "🤖 " + m.message; $("banner").classList.add("on"); }
+  // The machine's clipboard changed: put it on this device's clipboard. A
+  // browser only allows that during a user gesture on some platforms, so on
+  // failure keep it and offer a tap-to-copy toast.
+  if (m.type === "clipboard") {
+    remoteClip = m.text;
+    navigator.clipboard?.writeText(m.text).then(() => toast("📋 copied from " + location.hostname.split(".")[0], 1500))
+      .catch(() => toast("📋 tap to copy what was copied there", 4000, () => navigator.clipboard?.writeText(remoteClip)));
+  }
   if (m.type === "control") {
     takenOverBy = m.taken_over_by;
     $("control").classList.toggle("on", !!takenOverBy);
@@ -617,6 +776,8 @@ function applyView() {
   clampView();
   canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
   canvas.style.width = canvas.width + "px"; canvas.style.height = canvas.height + "px";
+  const c4 = $("screen444");
+  c4.style.transform = canvas.style.transform; c4.style.width = canvas.style.width; c4.style.height = canvas.style.height;
   if (lastCursors) renderCursors(lastCursors);
   if (lifted) drawTiles();
 }
@@ -1137,8 +1298,9 @@ acts.addEventListener("click", e => { if (e.target.closest("button")) { acts.cla
 // ---- files: drag and drop, upload, Downloads list ------------------------------
 const CHUNK = 8 * 1024 * 1024;
 const human = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
-function toast(text, ms = 3000) {
+function toast(text, ms = 3000, onTap = null) {
   const t = document.createElement("div"); t.className = "toast"; t.textContent = text; $("toasts").append(t);
+  if (onTap) { t.style.pointerEvents = "auto"; t.style.cursor = "pointer"; t.onclick = () => { onTap(); t.remove(); }; }
   if (ms) setTimeout(() => t.remove(), ms);
   return t;
 }
@@ -1354,6 +1516,17 @@ async function micStop(cancel) {
     talk.classList.remove("on"); toast("✕ dictation: " + e.message, 5000);
   } finally { $("mic-btn").classList.remove("busy"); }
 }
+// Pasting into the view: this device's clipboard goes to the machine's first,
+// so Ctrl+V there pastes what you copied here.
+let remoteClip = "";
+document.addEventListener("paste", e => {
+  const text = e.clipboardData?.getData("text/plain");
+  if (text && text !== remoteClip) send({ type: "clipboard", text });
+});
+async function pushClipboard() {
+  try { const t = await navigator.clipboard.readText(); if (t && t !== remoteClip) send({ type: "clipboard", text: t }); } catch {}
+}
+addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") pushClipboard(); }, true);
 /** Type text into the focused window, as the phone keyboard does. */
 function typeText(text) {
   for (const ch of text) { const k = US[ch]; if (k) send({ type: "combo", code: k[0], mods: k[1] ? 1 : 0 }); }

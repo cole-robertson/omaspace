@@ -5,6 +5,7 @@ mod cdp;
 mod client;
 mod cookies;
 mod files;
+mod gliff;
 mod hypr;
 mod input;
 mod mcp;
