@@ -116,6 +116,12 @@ pub fn capture(profile: &Path, urls: &[String], allowed: &[String]) -> anyhow::R
 /// cookies and local storage (not passwords or history), plus Preferences.
 /// `sites` holds "*", which `apply_all` (and only it) accepts.
 pub fn capture_all(profile: &Path) -> anyhow::Result<ProfileData> {
+    capture_all_with(profile, &cookies::Keys::local())
+}
+
+/// `capture_all` reading cookies with `keys`: an agent's profile is read with
+/// `Keys::basic()` (its browser runs without the keyring).
+pub fn capture_all_with(profile: &Path, keys: &cookies::Keys) -> anyhow::Result<ProfileData> {
     let all = vec![ALL_SITES.to_string()];
     let mut data = ProfileData {
         sites: all.clone(),
@@ -128,7 +134,7 @@ pub fn capture_all(profile: &Path) -> anyhow::Result<ProfileData> {
             base64::engine::general_purpose::STANDARD.encode(bytes),
         );
     }
-    data.cookies = cookies::read(profile, &all, &cookies::Keys::local())?;
+    data.cookies = cookies::read(profile, &all, keys)?;
     data.allowed_sensitive.push("cookies".into());
     Ok(data)
 }
@@ -137,12 +143,23 @@ pub fn capture_all(profile: &Path) -> anyhow::Result<ProfileData> {
 /// A new profile gets an empty Cookies database first: Chromium creates its
 /// own only on first run, and `cookies::write` needs one to merge into.
 pub fn apply_all(profile: &Path, data: &ProfileData) -> anyhow::Result<Applied> {
+    apply_all_with(profile, data, &cookies::Keys::local())
+}
+
+/// `apply_all` with the cookie keys of the browser that will read them: an
+/// agent's browser runs with `--password-store=basic`, so its cookies are
+/// written with `Keys::basic()`.
+pub fn apply_all_with(
+    profile: &Path,
+    data: &ProfileData,
+    keys: &cookies::Keys,
+) -> anyhow::Result<Applied> {
     anyhow::ensure!(data.sites == [ALL_SITES], "not whole-profile data");
     std::fs::create_dir_all(profile)?;
     if !profile.join("Cookies").is_file() && !data.cookies.is_empty() {
         cookies::create_empty(&profile.join("Cookies"))?;
     }
-    apply(profile, data)
+    apply_with(profile, data, keys)
 }
 
 /// The site filter that matches every site (whole-profile copies only).
@@ -157,6 +174,10 @@ pub struct Applied {
 
 /// Write `data` into a profile dir whose browser is closed.
 pub fn apply(profile: &Path, data: &ProfileData) -> anyhow::Result<Applied> {
+    apply_with(profile, data, &cookies::Keys::local())
+}
+
+fn apply_with(profile: &Path, data: &ProfileData, keys: &cookies::Keys) -> anyhow::Result<Applied> {
     let mut applied = Applied::default();
     std::fs::create_dir_all(profile)?;
     // Mark the user-data dir as past first run, as a normal launch would.
@@ -198,7 +219,7 @@ pub fn apply(profile: &Path, data: &ProfileData) -> anyhow::Result<Applied> {
                 .all(|c| cookies::host_matches(&c.host_key, &data.sites)),
             "a cookie outside the workspace's sites"
         );
-        applied.cookies = cookies::write(profile, &data.cookies, &cookies::Keys::local())?;
+        applied.cookies = cookies::write(profile, &data.cookies, keys)?;
     }
     Ok(applied)
 }

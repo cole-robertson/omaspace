@@ -9,10 +9,12 @@ and give AI agents a workspace of their own next to yours.
   directory, same tmux session) and editors reopen there, on the same
   workspace. Pull it back later. `--with-files` brings the project folders
   along.
-- **Live view.** Watch any of your machines from a phone or another computer's
-  browser, with real keyboard, mouse and touch input, a phone-shaped virtual
-  screen, workspace switching, file upload and download, and hold-to-talk
-  dictation.
+- **Live view, built on [gliff](https://github.com/omacom/gliff).** Watch any of
+  your machines from a phone or another computer's browser. gliff, Omarchy's
+  remote desktop, captures and encodes the screen on the GPU, keeps text sharp
+  (full 4:4:4 colour in a laptop's browser), adapts to the connection and
+  carries the clipboard; omaspace brings it to any browser, with touch
+  gestures, a phone-shaped screen, workspace switching, files and dictation.
 - **Agent spaces.** An MCP server gives agents their own Omarchy workspace,
   with a browser signed in as you, a terminal and desktop apps, that never
   takes your focus or pointer. You can watch them from your phone, and hand

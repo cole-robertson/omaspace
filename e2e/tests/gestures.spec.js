@@ -3,6 +3,7 @@
 // through Omarchy's voxtype on the watched machine.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import { isPhoneScreen } from "../lib/machine.js";
 
 const WS = 5;
 
@@ -27,7 +28,7 @@ async function drag(page, from, to, ms, steps = 12) {
 
 test("a quick swipe left goes to the next workspace, right goes back", async ({ desk, phone }) => {
   const view = await phone.open(desk, { workspace: String(WS) });
-  const phoneWs = () => desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id;
+  const phoneWs = () => desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id;
   await waitFor(() => phoneWs() === WS, "phone screen on the start workspace");
   await drag(view.page, [0.85, 0.5], [0.15, 0.52], 180);
   await waitFor(() => phoneWs() === WS + 1, `swipe left → workspace ${WS + 1}`);
@@ -38,7 +39,7 @@ test("a quick swipe left goes to the next workspace, right goes back", async ({ 
 
 test("a slow sideways drag or a mostly vertical one is not a swipe", async ({ desk, phone }) => {
   const view = await phone.open(desk, { workspace: String(WS) });
-  const phoneWs = () => desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id;
+  const phoneWs = () => desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id;
   await waitFor(() => phoneWs() === WS, "phone screen on the start workspace");
   await drag(view.page, [0.6, 0.5], [0.4, 0.5], 1500);      // short and slow: a cursor drag
   await drag(view.page, [0.5, 0.3], [0.35, 0.8], 200);      // fast but diagonal/vertical: a scroll
@@ -132,7 +133,9 @@ test("switching workspaces never decodes on top of a missing frame (no smearing)
   const r = await view.page.evaluate(() => ({ bad: window.__bad, keys: window.__keys, dropped }));
   expect(r.dropped, "the slow-phone simulation dropped frames").toBeGreaterThan(0);
   expect(r.bad, `delta frames decoded after a drop (${r.dropped} dropped)`).toBe(0);
-  expect(r.keys, "keyframes arrive often (every 0.5s)").toBeGreaterThanOrEqual(3);
+  // A keyframe follows every drop (omaspace's own encoder sends one every
+  // 0.5s; gliff sends one when the viewer asks after a drop).
+  expect(r.keys, "keyframes arrive after drops").toBeGreaterThanOrEqual(Math.min(3, r.dropped));
   // And no sliding: the picture itself never moves during a swipe.
   expect(await view.page.evaluate(() => getComputedStyle(document.getElementById("screen")).translate)).toMatch(/^(none|0px)/);
 });
@@ -180,10 +183,10 @@ test("arrow pad: hold and slide up walks back through shell history; a tap is on
 test("arrow pad slides never swipe workspaces or lift tiles", async ({ desk, phone }) => {
   const view = await phone.open(desk, { workspace: String(WS) });
   const page = view.page, pad = await page.locator("#arrows").boundingBox();
-  const before = desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id;
+  const before = desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id;
   await page.mouse.move(pad.x + pad.width / 2, pad.y + pad.height / 2); await page.mouse.down();
   await page.mouse.move(pad.x + pad.width / 2 + 120, pad.y + pad.height / 2, { steps: 6 });
   await page.waitForTimeout(400); await page.mouse.up();
   expect(await page.evaluate(() => [lastSwipe, !!lifted])).toEqual([null, false]);
-  expect(desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id).toBe(before);
+  expect(desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id).toBe(before);
 });

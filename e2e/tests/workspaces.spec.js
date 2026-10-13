@@ -31,6 +31,7 @@ test("give: a terminal reopens on the same workspace and folder on the other mac
 });
 
 test("take back: browser tabs and a terminal come back from the other machine", async ({ peer, desk }) => {
+  test.skip(!desk.keyringUnlocked(), "the desk's login keyring is locked: its own Chromium can't load pages until it's unlocked");
   await desk.browser(["https://example.org/", "https://www.rfc-editor.org/"], WS);
   await desk.terminal("$HOME", WS);
 

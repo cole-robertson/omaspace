@@ -250,7 +250,11 @@ pub fn open_browser(
     std::fs::create_dir_all(data_dir.join("Default"))?;
     if signed_in {
         let data = profile::capture_all(&your_dir.join("Default"))?;
-        profile::apply_all(&data_dir.join("Default"), &data)?;
+        profile::apply_all_with(
+            &data_dir.join("Default"),
+            &data,
+            &crate::cookies::Keys::basic(),
+        )?;
     }
     // DevTools over a pipe the broker holds, relayed on a 0600 socket: with a
     // --remote-debugging-port any local user could read this profile's
@@ -267,6 +271,10 @@ pub fn open_browser(
         format!("--user-data-dir={}", data_dir.display()),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
+        // Its own copy of your sign-ins, encrypted with Chromium's built-in
+        // key rather than the keyring: a locked keyring would otherwise stop
+        // every page load on its unlock prompt, with nobody there to answer.
+        "--password-store=basic".into(),
         "--new-window".into(),
     ];
     if urls.is_empty() {
@@ -433,7 +441,8 @@ pub fn take_back(home: &Path, agent: &str, id: Option<&str>) -> anyhow::Result<V
     // Sign-ins it picked up go back into your profile (your browser restarts
     // briefly, as on a take-back from another machine).
     let (browser, your_dir) = user_browser(home)?;
-    let data = profile::capture_all(&b.data_dir.join("Default"))?;
+    let data =
+        profile::capture_all_with(&b.data_dir.join("Default"), &crate::cookies::Keys::basic())?;
     let restarted = profile::close_browser(&your_dir, &omarchy_binary_name(&browser))?;
     let applied = profile::apply_all(&your_dir.join("Default"), &data)?;
     if restarted {

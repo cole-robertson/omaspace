@@ -1,6 +1,7 @@
 // The live view: laptop and phone, controls, phone mode, files, agents.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import { isPhoneScreen } from "../lib/machine.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -17,10 +18,11 @@ test("laptop: streams at native size and types into a terminal", async ({ desk, 
   const dir = desk.scratch("view");
   const term = await desk.terminal(dir, WS);
   const view = await laptop.open(desk);
-  // Static frames are skipped, so an idle screen streams only a few fps.
+  // A still screen sends few or no frames (gliff only on change); the view
+  // is live once a picture has been drawn.
   const s = await view.stats();
-  expect(s.fps).toBeGreaterThan(0);
-  const mon = desk.monitors().find(m => !m.name.startsWith("OSP-"));
+  expect(await view.page.evaluate(() => window.__drawnFrames || 0)).toBeGreaterThan(0);
+  const mon = desk.monitors().find(m => !isPhoneScreen(m));
   expect([s.width, s.height]).toEqual([mon.width, mon.height]);
 
   await view.tapWorkspace(WS);
@@ -41,7 +43,7 @@ test("laptop: SUPER+number from the key bar switches the real workspace", async 
 test("phone: a phone-shaped virtual screen, workspace strip, and cleanup", async ({ desk, phone }) => {
   await desk.terminal("$HOME", WS);
   const view = await phone.open(desk, { workspace: String(WS) });
-  const phoneOut = await waitFor(() => desk.monitors().find(m => m.name.startsWith("OSP-PHONE")), "phone screen");
+  const phoneOut = await waitFor(() => desk.monitors().find(m => isPhoneScreen(m)), "phone screen");
   expect(phoneOut.height).toBeGreaterThan(phoneOut.width);
   expect(phoneOut.activeWorkspace.id).toBe(WS);
   const s = await view.stats();
@@ -55,7 +57,7 @@ test("phone: a phone-shaped virtual screen, workspace strip, and cleanup", async
   await waitFor(() => desk.monitors().find(m => m.name === phoneOut.name)?.activeWorkspace.id === WS, "phone screen back on ws");
 
   await view.close();
-  await waitFor(() => !desk.monitors().some(m => m.name.startsWith("OSP-PHONE")), "phone screen removed on disconnect");
+  await waitFor(() => !desk.monitors().some(m => isPhoneScreen(m)), "phone screen removed on disconnect");
 });
 
 test("phone: typing on the phone keyboard runs in the terminal", async ({ desk, phone }) => {

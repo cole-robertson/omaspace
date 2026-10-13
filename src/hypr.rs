@@ -143,6 +143,29 @@ pub fn active_workspace() -> anyhow::Result<i64> {
     Ok(serde_json::from_str::<Active>(&hyprctl(&["-j", "activeworkspace"])?)?.id)
 }
 
+/// Whether any monitor is showing this workspace right now. Capturing a
+/// window on a workspace that is not on a monitor crashed Hyprland 0.56.2.
+pub fn workspace_on_monitor(id: i64) -> anyhow::Result<bool> {
+    Ok(shown_workspaces(&monitors_all()?).contains(&id))
+}
+
+fn shown_workspaces(monitors: &serde_json::Value) -> Vec<i64> {
+    monitors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| !m["disabled"].as_bool().unwrap_or(false))
+        .flat_map(|m| {
+            [
+                m["activeWorkspace"]["id"].as_i64(),
+                m["specialWorkspace"]["id"].as_i64(),
+            ]
+        })
+        .flatten()
+        .filter(|&id| id != 0)
+        .collect()
+}
+
 /// Pixel size of the first real (non-virtual) monitor.
 pub fn primary_monitor_size() -> anyhow::Result<(u32, u32)> {
     let list: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])?)?;
@@ -214,6 +237,22 @@ pub fn lua_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_workspaces_a_monitor_shows_count_as_visible() {
+        let monitors = serde_json::json!([
+            {"disabled": false, "activeWorkspace": {"id": 1}, "specialWorkspace": {"id": 0}},
+            {"disabled": true, "activeWorkspace": {"id": 4}, "specialWorkspace": {"id": 0}},
+            {"disabled": false, "activeWorkspace": {"id": 6}, "specialWorkspace": {"id": -98}}
+        ]);
+        let shown = super::shown_workspaces(&monitors);
+        assert!(shown.contains(&1) && shown.contains(&6) && shown.contains(&-98));
+        assert!(!shown.contains(&4), "a disabled monitor shows nothing");
+        assert!(
+            !shown.contains(&9),
+            "an agent workspace off every monitor is not visible"
+        );
+    }
+
     #[test]
     fn lua_strings_cannot_be_broken_out_of() {
         assert_eq!(super::lua_string("3"), "\"3\"");

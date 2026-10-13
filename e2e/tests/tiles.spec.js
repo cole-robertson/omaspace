@@ -3,6 +3,7 @@
 // phone-shaped screen; Hyprland's own layout is checked afterwards.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import { isPhoneScreen } from "../lib/machine.js";
 
 const WS = 8;
 
@@ -32,7 +33,7 @@ async function touch(page) {
 async function twoTiles(desk, phone) {
   desk.dispatch(`hl.dsp.focus({ workspace = "${WS}" })`);
   const view = await phone.open(desk, { workspace: String(WS) });
-  await waitFor(() => desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id === WS, "phone screen on the test workspace");
+  await waitFor(() => desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id === WS, "phone screen on the test workspace");
   // Opened after the phone screen exists, so Omarchy tiles them for it.
   const a = await desk.terminal("$HOME", WS);
   const b = await desk.terminal("$HOME", WS);
@@ -145,7 +146,7 @@ test("a fullscreen window covers the others: nothing behind it can be lifted or 
 test("swapping three tiles in a row swaps exactly the ones you drag", async ({ desk, phone }) => {
   desk.dispatch(`hl.dsp.focus({ workspace = "${WS}" })`);
   const view = await phone.open(desk, { workspace: String(WS) });
-  await waitFor(() => desk.monitors().find(m => m.name.startsWith("OSP-PHONE"))?.activeWorkspace.id === WS, "phone screen on the test workspace");
+  await waitFor(() => desk.monitors().find(m => isPhoneScreen(m))?.activeWorkspace.id === WS, "phone screen on the test workspace");
   const wins = [];
   for (let i = 0; i < 3; i++) wins.push(await desk.terminal("$HOME", WS));
   await view.page.waitForFunction(n => state.windows.filter(w => w.workspace === n).length >= 3, WS, { timeout: 15_000 });

@@ -389,13 +389,28 @@ pub fn app_read(
     screenshot: bool,
 ) -> anyhow::Result<Value> {
     let (pid, window_id) = target(home, agent, address)?;
+    // Capturing a window on a workspace no monitor is showing crashed
+    // Hyprland 0.56.2 (SEGV in Screenshare::CScreenshareSession::init via
+    // toplevel export, 2026-10-03 and 2026-10-09). Agent workspaces are
+    // usually off-screen, so pixels are only grabbed when the workspace is on
+    // a monitor; the accessibility tree is read either way. Not asking for
+    // the screenshot is what avoids the crash: dropping it afterwards is too
+    // late.
+    let (ws, _) = agent_windows(home, agent)?;
+    let capture = screenshot && hypr::workspace_on_monitor(ws).unwrap_or(false);
     let mut v = driver_call_in(
         Some(&sess(agent)),
         "get_window_state",
-        &json!({"pid": pid, "window_id": window_id}),
+        &json!({"pid": pid, "window_id": window_id, "include_screenshot": capture}),
     )?;
-    if !screenshot && let Some(o) = v.as_object_mut() {
+    if !capture && let Some(o) = v.as_object_mut() {
         o.remove("screenshot_png_b64");
+        if screenshot {
+            o.insert(
+                "screenshot_skipped".into(),
+                json!("your workspace is not on a monitor, and capturing it can crash Hyprland; only the accessibility tree is returned"),
+            );
+        }
     }
     // The tree as markdown is what an agent reads; elements carry the tokens.
     let elements: Vec<Value> = v["elements"]
@@ -408,6 +423,7 @@ pub fn app_read(
     Ok(json!({
         "title": v["window_title"], "snapshot": v["snapshot_id"], "elements": elements,
         "screenshot_png_b64": v.get("screenshot_png_b64").cloned().unwrap_or(Value::Null),
+        "screenshot_skipped": v.get("screenshot_skipped").cloned().unwrap_or(Value::Null),
     }))
 }
 

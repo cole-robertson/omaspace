@@ -7,6 +7,10 @@ import { hostname } from "node:os";
 
 const HYPR_ENV = `export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(for s in $(ls -t /run/user/$(id -u)/hypr/); do HYPRLAND_INSTANCE_SIGNATURE=$s timeout 2 hyprctl -j version >/dev/null 2>&1 && { echo $s; break; }; done) OMARCHY_PATH=$(test -d ~/.local/share/omarchy && readlink -f ~/.local/share/omarchy || echo /usr/share/omarchy) PATH=$HOME/.local/bin:$PATH CUA_TELEMETRY=0`;
 
+/** A phone-shaped screen made for a viewer: omaspace's own (OSP-PHONE-…) or
+ *  gliff's headless one (gliff-…). */
+export const isPhoneScreen = m => /^(OSP-PHONE|gliff-)/.test(m.name);
+
 export class Machine {
   /** @param {string} name tailnet hostname, e.g. "peer" */
   constructor(name) {
@@ -144,7 +148,7 @@ export class Machine {
   spacesState() { return JSON.parse(this.spaces("debugState")); }
 
   /** Pixel size of the primary monitor. */
-  screen() { const m = this.monitors().find(m => !m.name.startsWith("OSP-")); return [m.width, m.height]; }
+  screen() { const m = this.monitors().find(m => !isPhoneScreen(m)); return [m.width, m.height]; }
 
   /** Call one omaspace MCP tool on this machine (a fresh stdio server). */
   mcp(tool, args) {
@@ -172,6 +176,12 @@ export class Machine {
     if (locked === "true") throw new Error(`${this.name} is locked: unlock it before running the tests`);
     this.sh(`omarchy-toggle-idle --status | grep -q '"enabled":true' || omarchy-toggle-idle stay-awake; hyprctl dispatch 'hl.dsp.dpms({ action = "on" })' >/dev/null`, { check: false });
     this._ready = true;
+  }
+
+  /** Whether the login keyring answers. A locked one holds the user's own
+   *  Chromium on "Loading..." until someone types its password. */
+  keyringUnlocked() {
+    return this.sh("timeout 5 secret-tool lookup application chromium >/dev/null 2>&1; [ $? -ne 124 ] && echo yes || echo no", { check: false }).trim() === "yes";
   }
 
   /** HTTPS base of this machine's live view (tailscale serve :7788). */

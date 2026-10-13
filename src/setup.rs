@@ -125,7 +125,27 @@ fn ask(prompt: &str) -> Option<String> {
     Some(line.trim().to_string())
 }
 
+/// gliff (Omarchy's remote desktop) streams the live view. It comes from
+/// the Omarchy package repository; without it the view falls back to its
+/// own recorder.
+fn install_gliff() {
+    if crate::gliff::available() {
+        return;
+    }
+    println!("installing gliff, which streams the live view (omarchy pkg add gliff)");
+    let ok = Command::new("omarchy-pkg-add")
+        .arg("gliff")
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        println!(
+            "couldn't install gliff: the live view uses its own recorder instead. Install it when it's in your package repository (omarchy pkg add gliff), or from https://github.com/omacom/gliff"
+        );
+    }
+}
+
 pub fn run(home: &Path) -> anyhow::Result<()> {
+    install_gliff();
     install_packages();
     if let Err(e) = owners_for_tagged_machine() {
         println!("couldn't check this machine's Tailscale owners: {e}");

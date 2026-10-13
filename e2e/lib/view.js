@@ -11,14 +11,18 @@ export class View {
     this.machine = machine;
   }
 
-  /** Wait until frames are decoding onto the canvas. */
+  /** Wait until a frame has been drawn. gliff sends frames only when the
+   *  screen changes, so a still screen shows 0 fps; the first picture is what
+   *  says the view is live. */
   async ready(timeout = 25000) {
     await this.page.waitForFunction(() => document.getElementById("screen")?.width > 300, null, { timeout });
-    await this.page.waitForFunction(() => /[1-9]\d* fps/.test(document.getElementById("stats")?.textContent || ""), null, { timeout });
+    await this.page.waitForFunction(() => (window.__drawnFrames || 0) > 0 || /[1-9]\d* fps/.test(document.getElementById("stats")?.textContent || ""), null, { timeout });
   }
 
   /** Bitrate, frame rate and stream size as shown in the stats pill. */
   async stats() {
+    // Wait for the first stats tick: the pill is empty until then.
+    await this.page.waitForFunction(() => /fps · \d+×\d+/.test(document.getElementById("stats")?.textContent || ""), null, { timeout: 5000 }).catch(() => {});
     const t = await this.page.textContent("#stats");
     const m = t.match(/([\d.]+) Mb\/s · (\d+) fps · (\d+)×(\d+)/);
     return m ? { mbps: +m[1], fps: +m[2], width: +m[3], height: +m[4] } : null;

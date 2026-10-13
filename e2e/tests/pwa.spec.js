@@ -1,6 +1,7 @@
 // Add to home screen, and switching between your machines.
 
 import { test, expect, waitFor } from "../lib/fixtures.js";
+import { isPhoneScreen } from "../lib/machine.js";
 
 test("installable: manifest, theme colors, and icons that render", async ({ desk, phone }) => {
   const view = await phone.open(desk, {});
@@ -38,7 +39,8 @@ test("when the view changes shape (home-screen app, rotation) the phone's screen
   const page = view.page;
   // Other phones may be watching too: find this page's screen by its size.
   const shape = () => page.evaluate(() => phoneShape.split("x").map(Number));
-  const mine = async () => { const [w, h] = await shape(); return desk.monitors().find(m => m.name.startsWith("OSP-PHONE") && Math.abs(m.height - h) < 8 && Math.abs(m.width - w) < 8); };
+  // Within a few pixels: the screen is rounded so its scale divides it.
+  const mine = async () => { const [w, h] = await shape(); return desk.monitors().find(m => isPhoneScreen(m) && Math.abs(m.height - h) < 8 && Math.abs(m.width - w) < 8); };
   const first = await waitFor(mine, "phone screen");
   // A home-screen app is taller than a Safari tab.
   const vp = page.viewportSize();
@@ -50,9 +52,13 @@ test("when the view changes shape (home-screen app, rotation) the phone's screen
     const m = new DOMMatrix(getComputedStyle(c).transform), w = c.width * m.a, h = c.height * m.d;
     return c.width > 0 && Math.abs(w - st.clientWidth) < 3 && Math.abs(h - st.clientHeight) < 3;
   }, null, { timeout: 15_000 });
-  // Still on the same workspace, and the old screen is gone.
-  expect(taller.activeWorkspace.id).toBe(6);
-  await waitFor(() => !desk.monitors().some(m => m.name === first.name), "old phone screen removed");
+  // Still on the same workspace. gliff resizes its screen in place (the same
+  // screen, so the workspace never moves); omaspace's own recorder replaces
+  // it with a new one and removes the old.
+  await waitFor(async () => (await mine())?.activeWorkspace.id === 6, "the phone screen shows workspace 6");
+  const engine = await page.evaluate(() => engine);
+  if (engine === "gliff") expect(taller.name, "resized in place").toBe(first.name);
+  else await waitFor(() => !desk.monitors().some(m => m.name === first.name), "old phone screen removed");
 });
 
 test("home-screen app fills the screen: no strip below the dock", async ({ desk, phone }) => {

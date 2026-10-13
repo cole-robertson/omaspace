@@ -32,6 +32,7 @@ test("an agent works in its own signed-in browser without touching the user's fo
 });
 
 test("the agent's browser is signed in as the user (their cookies came along)", async ({ desk }) => {
+  test.skip(!desk.keyringUnlocked(), "the desk's login keyring is locked: its own Chromium can't load pages until it's unlocked");
   // The user "signs in": a cookie set in their own browser. The agent's copy
   // of the profile must carry it.
   const marker = `omaspace_e2e_signin_${Date.now()}`;
@@ -105,6 +106,7 @@ test("the phone sees the agent's workspace, its status, and its call for help", 
 });
 
 test("hand a browser window to the agent, then take it back", async ({ desk, phone }) => {
+  test.skip(!desk.keyringUnlocked(), "the desk's login keyring is locked: its own Chromium can't load pages until it's unlocked");
   const space = desk.mcp("claim_space", { agent: AGENT, task: "finish the order" });
   const mine = await desk.browser(["https://example.org/", "https://www.iana.org/help/example-domains"], ME);
   // Let Chromium write its session file so the tabs can be read.
@@ -192,7 +194,7 @@ test("an agent's terminal: runs commands and reads the screen while the user kee
 });
 
 test("an agent uses a desktop app (GTK file manager) by its accessibility tree, in the background", async ({ desk }) => {
-  test.skip(desk.sh("test -d /usr/share/omaspace-driver && echo yes || echo no", { check: false }).trim() !== "yes", "needs the omaspace-driver package on the desk");
+  test.skip(desk.sh("test -d /usr/share/omaspace-driver && systemctl --user is-active -q omaspace-cua-driver && echo yes || echo no", { check: false }).trim() !== "yes", "needs omaspace-driver installed and running on the desk");
   const dir = desk.scratch("agent-app");
   desk.write(`${dir}/report-q3.txt`, "x");
   const space = desk.mcp("claim_space", { agent: AGENT, task: "look at files" });

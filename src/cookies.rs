@@ -70,6 +70,16 @@ impl Keys {
         }
     }
 
+    /// Keys for a profile Chromium runs with `--password-store=basic`: no
+    /// keyring, so values are written with the built-in `v10` key. An agent's
+    /// browser uses this, so a locked keyring never stalls it.
+    pub fn basic() -> Keys {
+        Keys {
+            v10: derive(b"peanuts"),
+            v11: None,
+        }
+    }
+
     #[cfg(test)]
     pub fn with_v11(secret: &[u8]) -> Keys {
         Keys {
@@ -111,12 +121,13 @@ impl Keys {
 }
 
 /// Chromium's libsecret password: `chrome`, then `chromium` (Arch/Omarchy).
+/// A locked keyring answers a lookup by asking for its password on screen and
+/// waiting; nobody may be there to type it (an agent's browser, a remote
+/// restore), so each lookup gets a few seconds. Without the key, only cookies
+/// it protects are left out, and the caller says so.
 fn libsecret_secret() -> Option<Zeroizing<Vec<u8>>> {
     for app in ["chrome", "chromium"] {
-        let out = std::process::Command::new("secret-tool")
-            .args(["lookup", "application", app])
-            .output()
-            .ok()?;
+        let out = lookup_with_deadline(app, std::time::Duration::from_secs(5))?;
         let mut secret = out.stdout;
         while secret.last().is_some_and(|b| *b == b'\n') {
             secret.pop();
@@ -126,6 +137,35 @@ fn libsecret_secret() -> Option<Zeroizing<Vec<u8>>> {
         }
     }
     None
+}
+
+/// `secret-tool lookup application <app>`, killed if it doesn't answer in
+/// time (a locked keyring waiting on its unlock prompt).
+fn lookup_with_deadline(app: &str, deadline: std::time::Duration) -> Option<std::process::Output> {
+    let mut child = std::process::Command::new("secret-tool")
+        .args(["lookup", "application", app])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if start.elapsed() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                eprintln!(
+                    "the keyring didn't answer (is it locked?); leaving out the cookies it protects"
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn meta_version(conn: &rusqlite::Connection) -> i64 {
@@ -217,6 +257,11 @@ pub fn read(profile: &Path, sites: &[String], keys: &Keys) -> anyhow::Result<Vec
         let value = if encrypted.is_empty() {
             plain_value
         } else {
+            // A cookie under the keyring's key while that key is unavailable
+            // (a locked keyring) is left out; the rest still travel.
+            if encrypted.starts_with(b"v11") && keys.v11.is_none() {
+                continue;
+            }
             let mut plain = keys
                 .decrypt(&encrypted)
                 .with_context(|| format!("cookie for {host_key}"))?;
@@ -328,6 +373,49 @@ mod tests {
             Keys::with_v11(b"machine-b").decrypt(&blob).is_err()
                 || Keys::with_v11(b"machine-b").decrypt(&blob).unwrap() != b"session=abc"
         );
+    }
+
+    /// A locked keyring gives no v11 key: the cookies it protects are left
+    /// out, and every other cookie is still read (the copy doesn't fail).
+    #[test]
+    fn a_locked_keyring_leaves_out_only_the_cookies_it_protects() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("Cookies")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE meta (key TEXT, value TEXT);
+             INSERT INTO meta VALUES ('version', '20');
+             CREATE TABLE cookies (host_key TEXT, top_frame_site_key TEXT, name TEXT, value TEXT,
+               encrypted_value BLOB, path TEXT, expires_utc INTEGER, is_secure INTEGER,
+               is_httponly INTEGER, samesite INTEGER, source_scheme INTEGER, source_port INTEGER,
+               has_expires INTEGER, is_persistent INTEGER, priority INTEGER,
+               has_cross_site_ancestor INTEGER, source_type INTEGER);",
+        )
+        .unwrap();
+        let unlocked = Keys::with_v11(b"sekrit");
+        let insert = |host: &str, blob: Vec<u8>| {
+            db.execute(
+                "INSERT INTO cookies VALUES (?1, '', 'sid', '', ?2, '/', 0, 1, 1, 0, 2, 443, 0, 0, 1, 0, 0)",
+                rusqlite::params![host, blob],
+            )
+            .unwrap();
+        };
+        insert("keyring.example", unlocked.encrypt(b"from the keyring"));
+        let mut v10 = b"v10".to_vec();
+        v10.extend(
+            Enc::new(derive(b"peanuts").as_ref().into(), &IV.into())
+                .encrypt_padded_vec_mut::<Pkcs7>(b"no keyring needed"),
+        );
+        insert("plain.example", v10);
+        drop(db);
+        let locked = Keys {
+            v10: derive(b"peanuts"),
+            v11: None,
+        };
+        let all = vec![crate::profile::ALL_SITES.to_string()];
+        let got = read(dir.path(), &all, &locked).unwrap();
+        assert_eq!(got.len(), 1, "only the cookie the keyring doesn't guard");
+        assert_eq!(got[0].host_key, "plain.example");
+        assert_eq!(got[0].value, "no keyring needed");
     }
 
     #[test]

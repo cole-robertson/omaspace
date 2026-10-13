@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 - 2026-10-12
+
+**The live view runs on [gliff](https://github.com/omacom/gliff),** Omarchy's
+remote desktop. omaspace starts `gliff-server` for each viewer and brings it
+to the browser; it falls back to its own recorder when gliff isn't installed.
+
+- **Much faster.** gliff captures and encodes on the GPU and sends a frame as
+  soon as the screen changes. Measured key press to picture on the same
+  network: 13-18 ms, where the old recorder took 70 ms on a phone and up to
+  600 ms on a laptop (sometimes never updating).
+- **Sharp text in a laptop's browser.** Full 4:4:4 colour: both of gliff's
+  streams decode in the browser and a WebGL2 shader recombines them. Phones
+  use a single stream to save bandwidth.
+- **Copy and paste between your device and the machine** (text, both ways).
+- **Phones get gliff's private screen,** sized to the phone; a laptop opened
+  at the same time still mirrors the real monitor. Rotating the phone or
+  adding the view to the home screen resizes that screen in place, so the
+  workspace on it never moves, and the workspace is pinned to the phone's
+  screen while it's connected (Hyprland would otherwise destroy an empty one
+  mid-move and reopen it elsewhere).
+- **An agent's browser never waits on a locked keyring.** It runs without the
+  keyring (its copy of your sign-ins uses Chromium's built-in key), and
+  reading your sign-ins gives the keyring 5 seconds: before, a locked keyring
+  hung `open_browser` and every page load until someone unlocked it.
+- **Agent screenshots can't crash Hyprland.** Capturing a window on a
+  workspace no monitor shows crashed Hyprland 0.56.2; `app_read` now skips the
+  screenshot there and returns the accessibility tree.
+
 ## 0.1.6 - 2026-10-08
 
 - **Tagged machines work from your phone after setup.** A machine owned by

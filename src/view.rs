@@ -64,6 +64,8 @@ struct Shared {
     input: Mutex<HashMap<String, mpsc::Sender<Event>>>,
     /// Phone screens: viewer id → (virtual output name, workspace it took).
     phones: Mutex<HashMap<u64, (String, i64)>>,
+    /// Viewers streaming through gliff: viewer id → its gliff session.
+    gliffs: Mutex<HashMap<u64, Arc<crate::gliff::Session>>>,
     /// A human took over: agent input is refused until hand back.
     taken_over: Mutex<Option<String>>,
     taken_by: Mutex<Option<u64>>,
@@ -93,6 +95,7 @@ pub fn serve() -> anyhow::Result<()> {
         outboxes: Mutex::new(HashMap::new()),
         input: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
+        gliffs: Mutex::new(HashMap::new()),
         taken_over: Mutex::new(None),
         taken_by: Mutex::new(None),
         help: Mutex::new(None),
@@ -1123,6 +1126,281 @@ fn queued(r: Result<(), tungstenite::Error>) -> anyhow::Result<bool> {
     }
 }
 
+/// A viewer streamed by gliff-server: a private screen shaped like a phone
+/// (`?phone=WxH&scale=S`), or the desktop mirrored at the viewer's width.
+/// gliff captures, encodes, adapts to the link and injects input; this keeps
+/// omaspace's own messages (state, cursors, agents, take over) on the same
+/// WebSocket.
+///
+/// Binary frames to the browser:
+/// - `0x02 | u32 w | u32 h | u8 dual` a new stream config
+/// - `0x03 | u8 key | u64 pts_us | u32 main_len | main | aux` a frame
+///   (aux empty unless 4:4:4)
+fn gliff_viewer(
+    mut ws: WebSocket<UnixStream>,
+    shared: Arc<Shared>,
+    id: u64,
+    name: String,
+    path: &str,
+    out_rx: mpsc::Receiver<String>,
+) -> anyhow::Result<()> {
+    let size = |key: &str| {
+        query(path, key).and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
+        })
+    };
+    let phone = size("phone");
+    let scale = query(path, "scale")
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(1.0);
+    let (w, h) = phone
+        .or_else(|| size("view"))
+        .unwrap_or((shared.output.1, shared.output.2));
+    // A phone screen: the same scale and size rules as omaspace's own phone
+    // screens (at least PHONE_MIN_LOGICAL_WIDTH wide, and a size the scale
+    // divides into whole logical pixels, or Hyprland rejects the scale).
+    let (w, h, scale) = if phone.is_some() {
+        let s = phone_scale(w, f64::from(scale));
+        let step = scale_step(s);
+        let fit = |v: u32| (v.clamp(320, 3000) / step * step).max(step);
+        (fit(w), fit(h), s as f32)
+    } else {
+        (w, h, 1.0)
+    };
+    let opts = crate::gliff::Options {
+        headless: phone.is_some(),
+        mirror: Some(shared.output.0.clone()),
+        width: w,
+        height: h,
+        scale,
+        low_bandwidth: query(path, "low").is_some(),
+        full_chroma: query(path, "chroma").as_deref() == Some("444"),
+    };
+    wake_screens();
+    let (session, events) = match crate::gliff::Session::start(&opts) {
+        Ok(s) => s,
+        Err(e) => {
+            shared.participants.lock().unwrap().remove(&id);
+            shared.outboxes.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+    };
+    shared.gliffs.lock().unwrap().insert(id, session.clone());
+    // gliff sets its screen's size and parks its pointer on it as the session
+    // starts; Hyprland rearranges workspaces as it does. Wait for the first
+    // stream config (the screen is ready) before moving the phone's workspace
+    // onto it, or the move can be undone. Events that arrive meanwhile are
+    // kept and handled below.
+    let mut early = Vec::new();
+    if phone.is_some() {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < until {
+            match events.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(ev) => {
+                    let ready = matches!(ev, crate::gliff::Event::Config { .. });
+                    early.push(ev);
+                    if ready {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+    if phone.is_some() {
+        // The workspace the phone asked for moves onto gliff's private screen.
+        let workspace = query(path, "workspace")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| hypr::active_workspace().unwrap_or(1));
+        let screen = session.output.clone();
+        // Claim the workspace first: an older session of this page (a phone
+        // that just reshaped) may be closing, and must not move it back.
+        shared
+            .phones
+            .lock()
+            .unwrap()
+            .insert(id, (screen.clone(), workspace));
+        // Pin the workspace to the phone's screen while it's connected: an
+        // empty workspace that nothing shows for a moment is destroyed and
+        // recreated wherever Hyprland likes, which a plain move can't stop.
+        // The rule keeps it alive and on this screen; it's lifted on leave.
+        pin_workspace(&screen, Some(workspace));
+        lua_dispatch(&format!(
+            "hl.dsp.focus({{ workspace = {} }})",
+            hypr::lua_string(&workspace.to_string())
+        ));
+        lua_dispatch(&format!(
+            "hl.dsp.workspace.move({{ monitor = {} }})",
+            hypr::lua_string(&screen)
+        ));
+        // Keyboard input follows Hyprland's focus: focus the phone's screen.
+        lua_dispatch(&format!(
+            "hl.dsp.focus({{ monitor = {} }})",
+            hypr::lua_string(&screen)
+        ));
+        // Hyprland applies the move asynchronously: wait (up to a second)
+        // until the screen shows the workspace, so the first state the phone
+        // gets already says where it is (a swipe right after would otherwise
+        // aim from the wrong workspace).
+        // When the phone reshaped, the old screen is still going away and
+        // Hyprland can hand the workspace back to it once; move it again
+        // until the new screen shows it (two seconds at most).
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut last_move = std::time::Instant::now();
+        while std::time::Instant::now() < until
+            && monitor(&screen).and_then(|m| m["activeWorkspace"]["id"].as_i64()) != Some(workspace)
+        {
+            if last_move.elapsed() > std::time::Duration::from_millis(300) {
+                lua_dispatch(&format!(
+                    "hl.dsp.workspace.move({{ workspace = {}, monitor = {} }})",
+                    hypr::lua_string(&workspace.to_string()),
+                    hypr::lua_string(&screen)
+                ));
+                last_move = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        shared
+            .phones
+            .lock()
+            .unwrap()
+            .insert(id, (screen, workspace));
+    }
+    ws.send(Message::text(
+        json!({"type": "hello", "id": id, "me": name, "engine": "gliff",
+               "stream": {"width": w, "height": h}, "output": {"width": w, "height": h},
+               "phone": phone.is_some()})
+        .to_string(),
+    ))?;
+    let my_output = || {
+        shared
+            .phones
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|(o, _)| o.clone())
+    };
+    ws.send(Message::text(state_for(my_output().as_deref()).to_string()))?;
+    ws.get_mut().set_nonblocking(true)?;
+    let result = (|| -> anyhow::Result<()> {
+        loop {
+            let mut idle = true;
+            for ev in early.drain(..).chain(events.try_iter()) {
+                idle = false;
+                use crate::gliff::Event as G;
+                match ev {
+                    G::Config {
+                        width,
+                        height,
+                        dual,
+                    } => {
+                        let mut m = vec![2u8];
+                        m.extend(width.to_be_bytes());
+                        m.extend(height.to_be_bytes());
+                        m.push(u8::from(dual));
+                        queued(ws.send(Message::binary(m)))?;
+                    }
+                    G::Frame {
+                        pts_us,
+                        key,
+                        main,
+                        aux,
+                        ..
+                    } => {
+                        let mut m = Vec::with_capacity(main.len() + aux.len() + 14);
+                        m.push(3);
+                        m.push(u8::from(key));
+                        m.extend(pts_us.to_be_bytes());
+                        m.extend((main.len() as u32).to_be_bytes());
+                        m.extend_from_slice(&main);
+                        m.extend_from_slice(&aux);
+                        // A full socket: drop this frame and ask for a fresh
+                        // keyframe, instead of buffering video without bound.
+                        if !queued(ws.send(Message::binary(m)))? {
+                            session.request_keyframe();
+                        }
+                    }
+                    G::ClipboardText(text) => {
+                        queued(ws.send(Message::text(
+                            json!({"type": "clipboard", "text": text}).to_string(),
+                        )))?;
+                    }
+                    G::Ended(why) => anyhow::bail!("{why}"),
+                }
+            }
+            for text in out_rx.try_iter() {
+                let text = if text.contains("\"state_changed\"") {
+                    state_for(my_output().as_deref()).to_string()
+                } else {
+                    text
+                };
+                queued(ws.send(Message::text(text)))?;
+                idle = false;
+            }
+            queued(ws.flush())?;
+            match ws.read() {
+                Ok(Message::Text(t)) => {
+                    idle = false;
+                    if let Ok(msg) = serde_json::from_str::<Value>(&t) {
+                        on_message(&shared, id, &name, &msg);
+                    }
+                }
+                Ok(Message::Close(_)) => return Ok(()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
+            if idle {
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+        }
+    })();
+    shared.participants.lock().unwrap().remove(&id);
+    shared.outboxes.lock().unwrap().remove(&id);
+    shared.gliffs.lock().unwrap().remove(&id);
+    // The phone's workspace goes back to the real screen before gliff removes
+    // its private one, but only if this screen still shows it: when the phone
+    // reshaped, its new screen has already taken the workspace, and moving it
+    // back now would leave the new screen on whatever Hyprland picks.
+    let mine = shared.phones.lock().unwrap().remove(&id);
+    // Lift this phone's workspace pin (set when it connected).
+    if let Some((screen, _)) = &mine {
+        pin_workspace(screen, None);
+    }
+    // Another phone screen (this page reconnecting in its new shape) has
+    // claimed the same workspace: it's that screen's now, not ours to return.
+    let claimed = |ws: i64| {
+        shared
+            .phones
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(_, w)| *w == ws)
+    };
+    if let Some((screen, workspace)) = mine
+        && !claimed(workspace)
+        && monitor(&screen).and_then(|m| m["activeWorkspace"]["id"].as_i64()) == Some(workspace)
+    {
+        lua_dispatch(&format!(
+            "hl.dsp.focus({{ workspace = {} }})",
+            hypr::lua_string(&workspace.to_string())
+        ));
+        lua_dispatch(&format!(
+            "hl.dsp.workspace.move({{ monitor = {} }})",
+            hypr::lua_string(&shared.output.0)
+        ));
+    }
+    session.stop();
+    let taker = *shared.taken_by.lock().unwrap();
+    if taker == Some(id) {
+        set_control(&shared, None);
+    }
+    broadcast_cursors(&shared);
+    result
+}
+
 fn viewer(
     mut ws: WebSocket<UnixStream>,
     shared: Arc<Shared>,
@@ -1150,6 +1428,9 @@ fn viewer(
     );
     let (out_tx, out_rx) = mpsc::channel::<String>();
     shared.outboxes.lock().unwrap().insert(id, out_tx);
+    if crate::gliff::available() && query(path, "window").is_none() {
+        return gliff_viewer(ws, shared, id, name, path, out_rx);
+    }
 
     // Window-only view captures the window's rectangle on screen, so bring
     // its workspace into view and focus it first; then read its live geometry.
@@ -1329,9 +1610,46 @@ fn viewer(
     result
 }
 
+/// Input for a gliff session. Positions come as 0..1 of the stream and gliff
+/// takes logical pixels of its screen; held modifiers (the phone's sticky
+/// SUPER, SHIFT …) become real key presses around the next keys.
+fn gliff_input(s: &crate::gliff::Session, event: Event) {
+    // Modifier evdev codes for the mask bits: shift, ctrl, alt, super.
+    const MODS: [(u32, u32); 4] = [(1, 42), (4, 29), (8, 56), (64, 125)];
+    static HELD: Mutex<u32> = Mutex::new(0);
+    match event {
+        Event::Move { x, y } => {
+            let (w, h) = s.extent();
+            s.motion(
+                x.clamp(0.0, 1.0) * f64::from(w),
+                y.clamp(0.0, 1.0) * f64::from(h),
+            );
+        }
+        Event::Button { button, pressed } => s.button(button, pressed),
+        Event::Scroll { dx, dy } => s.scroll(dx, dy),
+        Event::Key { code, pressed } => s.key(code, pressed),
+        Event::Mods { mask } => {
+            let mut held = HELD.lock().unwrap();
+            for (bit, code) in MODS {
+                let (was, now) = (*held & bit != 0, mask & bit != 0);
+                if was != now {
+                    s.key(code, now);
+                }
+            }
+            *held = mask;
+        }
+    }
+}
+
 /// Send input for viewer `id`: onto its phone screen if it has one, else the
 /// primary monitor.
 fn send_input_for(shared: &Shared, id: u64, event: Event) {
+    // Streamed by gliff: its own virtual devices take the input.
+    let session = shared.gliffs.lock().unwrap().get(&id).cloned();
+    if let Some(s) = session {
+        gliff_input(&s, event);
+        return;
+    }
     let target = shared
         .phones
         .lock()
@@ -1652,6 +1970,11 @@ fn phone_swap(shared: &Shared, id: u64, target: i64) -> Option<String> {
         return Some(name);
     }
     let ws = |n: i64| hypr::lua_string(&n.to_string());
+    // The pin moves with the phone (a gliff phone's workspace is pinned to
+    // its screen): lift the old one, pin the new workspace.
+    if shared.gliffs.lock().unwrap().contains_key(&id) {
+        pin_workspace(&name, Some(target));
+    }
     // Old workspace back to the monitor it belongs on.
     lua_dispatch(&format!("hl.dsp.focus({{ workspace = {} }})", ws(current)));
     lua_dispatch(&format!(
@@ -1679,6 +2002,33 @@ fn phone_swap(shared: &Shared, id: u64, target: i64) -> Option<String> {
         .unwrap()
         .insert(id, (name.clone(), target));
     Some(name)
+}
+
+/// Pin `workspace` to `screen` (persistent, so Hyprland can't destroy and
+/// recreate it elsewhere while a phone shows it), or lift every pin on that
+/// screen. Hyprland can disable a workspace rule but not delete one, so a rule
+/// is made once per (screen, workspace) and switched on and off after that.
+fn pin_workspace(screen: &str, workspace: Option<i64>) {
+    let key = |ws: i64| format!("{screen}:{ws}");
+    let lua = match workspace {
+        Some(ws) => format!(
+            "omaspace_pins = omaspace_pins or {{}}; \
+             for k, r in pairs(omaspace_pins) do if k:find({prefix}, 1, true) == 1 then r:set_enabled(false) end end; \
+             local k = {key}; \
+             if omaspace_pins[k] then omaspace_pins[k]:set_enabled(true) \
+             else omaspace_pins[k] = hl.workspace_rule({{ workspace = {ws}, monitor = {screen}, persistent = true }}) end",
+            prefix = hypr::lua_string(&format!("{screen}:")),
+            key = hypr::lua_string(&key(ws)),
+            ws = hypr::lua_string(&ws.to_string()),
+            screen = hypr::lua_string(screen),
+        ),
+        None => format!(
+            "omaspace_pins = omaspace_pins or {{}}; \
+             for k, r in pairs(omaspace_pins) do if k:find({prefix}, 1, true) == 1 then r:set_enabled(false) end end",
+            prefix = hypr::lua_string(&format!("{screen}:")),
+        ),
+    };
+    lua_dispatch_eval(&lua);
 }
 
 fn lua_dispatch_eval(lua: &str) {
@@ -1932,6 +2282,33 @@ fn on_message(shared: &Shared, id: u64, name: &str, msg: &Value) {
                 _ => return,
             };
             lua_dispatch(&format!("hl.dsp.exec_cmd({})", hypr::lua_string(cmd)));
+        }
+        // The phone changed shape (rotated, or became a home-screen app): gliff
+        // resizes its private screen in place, keeping the workspace on it.
+        "phone_resize" => {
+            let session = shared.gliffs.lock().unwrap().get(&id).cloned();
+            if let (Some(s), Some(w), Some(h)) =
+                (session, msg["width"].as_u64(), msg["height"].as_u64())
+            {
+                let scale = phone_scale(w as u32, msg["scale"].as_f64().unwrap_or(1.0));
+                let step = scale_step(scale);
+                let fit = |v: u32| (v.clamp(320, 3000) / step * step).max(step);
+                s.resize(fit(w as u32), fit(h as u32), scale as f32);
+            }
+        }
+        // The viewer dropped a frame: gliff sends a keyframe only on request.
+        "keyframe" => {
+            let session = shared.gliffs.lock().unwrap().get(&id).cloned();
+            if let Some(s) = session {
+                s.request_keyframe();
+            }
+        }
+        // Text from the viewer's clipboard, offered to the machine's.
+        "clipboard" => {
+            let session = shared.gliffs.lock().unwrap().get(&id).cloned();
+            if let (Some(s), Some(text)) = (session, msg["text"].as_str()) {
+                s.offer_text(text.chars().take(1 << 20).collect());
+            }
         }
         "take_over" => set_control(shared, Some((name, id))),
         "hand_back" => set_control(shared, None),
