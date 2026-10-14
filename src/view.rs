@@ -1815,7 +1815,12 @@ fn clean_scale(s: f64) -> f64 {
 /// in lowest terms, sizes must be multiples of p (3 → 3, 2.5 → 5, 1.25 → 5).
 fn scale_step(s: f64) -> u32 {
     let q = (1..=8)
-        .find(|d| (s * f64::from(*d)).fract() == 0.0)
+        .find(|d| {
+            // Near a whole number from either side: an f32 scale like 1.4
+            // arrives as 1.3999…, so 7 comes out as 6.9999….
+            let n = s * f64::from(*d);
+            (n - n.round()).abs() < 1e-4
+        })
         .unwrap_or(4);
     (s * f64::from(q)).round() as u32
 }
@@ -2369,6 +2374,8 @@ mod tests {
         assert_eq!(super::scale_step(1.25), 5);
         assert_eq!(super::scale_step(3.0), 3);
         assert_eq!(super::scale_step(2.0), 2);
+        assert_eq!(super::scale_step(f64::from(1.4f32)), 7);
+        assert_eq!(super::scale_step(f64::from(1.8f32)), 9);
     }
 
     #[test]
