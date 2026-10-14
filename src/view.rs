@@ -19,7 +19,6 @@
 
 use crate::hypr;
 use crate::input::{self, Event};
-use crate::stream::{Captures, Source};
 use crate::tailnet::{self, Identity};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -56,12 +55,9 @@ struct Shared {
     me: Identity,
     /// This view's own origin, `https://<host>.<tailnet>:7788`.
     origin: String,
-    captures: Captures,
     participants: Mutex<HashMap<u64, Participant>>,
     /// Text messages to every viewer (state, cursors, help).
     outboxes: Mutex<HashMap<u64, mpsc::Sender<String>>>,
-    /// Input channels keyed by target output ("" = the primary monitor).
-    input: Mutex<HashMap<String, mpsc::Sender<Event>>>,
     /// Phone screens: viewer id → (virtual output name, workspace it took).
     phones: Mutex<HashMap<u64, (String, i64)>>,
     /// Viewers streaming through gliff: viewer id → its gliff session.
@@ -90,10 +86,8 @@ pub fn serve() -> anyhow::Result<()> {
     let shared = Arc::new(Shared {
         me,
         origin,
-        captures: Captures::default(),
         participants: Mutex::new(HashMap::new()),
         outboxes: Mutex::new(HashMap::new()),
-        input: Mutex::new(HashMap::new()),
         phones: Mutex::new(HashMap::new()),
         gliffs: Mutex::new(HashMap::new()),
         taken_over: Mutex::new(None),
@@ -923,10 +917,6 @@ fn broadcast_cursors(shared: &Shared) {
     broadcast(shared, json!({"type": "cursors", "participants": list}));
 }
 
-fn state() -> Value {
-    state_for(None)
-}
-
 /// Hyprland state; `active_workspace` is the one shown on `output` (a phone
 /// screen) when given, else Hyprland's focused workspace.
 fn state_for(output: Option<&str>) -> Value {
@@ -1066,57 +1056,6 @@ fn query(path: &str, key: &str) -> Option<String> {
 /// the monitor, even dimensions (H.264 needs them).
 /// The smallest standard width at least as wide as asked, capped at the
 /// screen's own width.
-fn stream_width(asked: u32, screen: u32) -> u32 {
-    const WIDTHS: [u32; 7] = [640, 960, 1280, 1600, 1920, 2560, 3840];
-    WIDTHS
-        .into_iter()
-        .find(|w| *w >= asked)
-        .unwrap_or(screen)
-        .min(screen)
-}
-
-fn source_for(shared: &Shared, path: &str, window: Option<&Value>) -> Source {
-    let (output, mw, mh) = shared.output.clone();
-    // A few fixed widths, not any number: each distinct width is its own
-    // encoder, and viewers of similar screens can share one.
-    let asked: u32 = query(path, "w")
-        .and_then(|w| w.parse().ok())
-        .unwrap_or(mw)
-        .clamp(320, mw);
-    let want_w = stream_width(asked, mw);
-    let region = window.map(|w| {
-        let at = &w["at"];
-        let size = &w["size"];
-        format!("{}x{}+{}+{}", size[0], size[1], at[0], at[1])
-    });
-    let (src_w, src_h) = window.map_or((mw, mh), |w| {
-        (
-            w["size"][0].as_u64().unwrap_or(1) as u32,
-            w["size"][1].as_u64().unwrap_or(1) as u32,
-        )
-    });
-    let scale = (f64::from(want_w) / f64::from(src_w)).min(1.0);
-    let even = |v: f64| ((v as u32) / 2 * 2).max(2);
-    let (w, h) = (
-        even(f64::from(src_w) * scale),
-        even(f64::from(src_h) * scale),
-    );
-    // 60 fps: the encoder's pipeline is ~1.5 frames deep, so this halves
-    // click-to-photon (~92 → ~42 ms measured); damage-driven capture keeps an
-    // idle screen free regardless of the rate.
-    Source {
-        output,
-        region,
-        width: w,
-        height: h,
-        fps: 60,
-        virtual_output: false,
-    }
-}
-
-/// A send or flush on the viewer's non-blocking socket: `Ok(true)` when it's
-/// out, `Ok(false)` when the socket is full (the message stays queued and goes
-/// out on a later flush), an error only when the connection is really gone.
 fn queued(r: Result<(), tungstenite::Error>) -> anyhow::Result<bool> {
     match r {
         Ok(()) => Ok(true),
@@ -1183,6 +1122,13 @@ fn gliff_viewer(
         Err(e) => {
             shared.participants.lock().unwrap().remove(&id);
             shared.outboxes.lock().unwrap().remove(&id);
+            // Say why on the page (gliff missing, or a protocol mismatch),
+            // not just a socket that keeps reconnecting.
+            let _ = ws.send(Message::text(
+                json!({"type": "unavailable", "message": e.to_string()}).to_string(),
+            ));
+            let _ = ws.close(None);
+            let _ = ws.flush();
             return Err(e);
         }
     };
@@ -1269,7 +1215,7 @@ fn gliff_viewer(
             .insert(id, (screen, workspace));
     }
     ws.send(Message::text(
-        json!({"type": "hello", "id": id, "me": name, "engine": "gliff",
+        json!({"type": "hello", "id": id, "me": name,
                "stream": {"width": w, "height": h}, "output": {"width": w, "height": h},
                "phone": phone.is_some()})
         .to_string(),
@@ -1402,7 +1348,7 @@ fn gliff_viewer(
 }
 
 fn viewer(
-    mut ws: WebSocket<UnixStream>,
+    ws: WebSocket<UnixStream>,
     shared: Arc<Shared>,
     who: Identity,
     path: &str,
@@ -1428,186 +1374,7 @@ fn viewer(
     );
     let (out_tx, out_rx) = mpsc::channel::<String>();
     shared.outboxes.lock().unwrap().insert(id, out_tx);
-    if crate::gliff::available() && query(path, "window").is_none() {
-        return gliff_viewer(ws, shared, id, name, path, out_rx);
-    }
-
-    // Window-only view captures the window's rectangle on screen, so bring
-    // its workspace into view and focus it first; then read its live geometry.
-    let window = query(path, "window").and_then(|addr| {
-        let found = state()["windows"]
-            .as_array()?
-            .iter()
-            .find(|w| w["address"] == addr.as_str())
-            .cloned()?;
-        lua_dispatch(&format!(
-            "hl.dsp.focus({{ window = {} }})",
-            hypr::lua_string(&format!("address:{addr}"))
-        ));
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        state()["windows"]
-            .as_array()?
-            .iter()
-            .find(|w| w["address"] == addr.as_str())
-            .cloned()
-            .or(Some(found))
-    });
-    // Phone mode streams a virtual screen with wf-recorder; without it, fall
-    // back to the whole desktop rather than failing (and leaking the screen).
-    let phone = query(path, "phone")
-        .filter(|_| crate::omarchy::which("wf-recorder").is_some())
-        .and_then(|v| {
-            let (w, h) = v.split_once('x')?;
-            Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
-        });
-    let source = match phone {
-        Some((w, h)) => {
-            let scale = query(path, "scale")
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(3.0);
-            let workspace = query(path, "workspace")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_else(|| hypr::active_workspace().unwrap_or(1));
-            match phone_screen(&shared, id, w, h, scale, workspace) {
-                Ok(src) => src,
-                Err(e) => {
-                    // A screen created before the failure must not linger.
-                    let name = format!("OSP-PHONE-{}-{id}", std::process::id());
-                    if monitor(&name).is_some() {
-                        remove_phone_screen(&name, Some(workspace), &shared.output.0, false);
-                    }
-                    shared.participants.lock().unwrap().remove(&id);
-                    shared.outboxes.lock().unwrap().remove(&id);
-                    return Err(e);
-                }
-            }
-        }
-        None => source_for(&shared, path, window.as_ref()),
-    };
-    // A powered-off screen (the machine idled) gives the recorder nothing to
-    // capture, and the viewer would see black: someone watching is activity,
-    // so turn the screens on. A lock screen stays up and is what they see.
-    wake_screens();
-    let capture = match shared.captures.get(&source) {
-        Ok(c) => c,
-        Err(e) => {
-            // Don't leave the virtual screen behind when its capture can't start.
-            end_phone_screen(&shared, id);
-            shared.participants.lock().unwrap().remove(&id);
-            shared.outboxes.lock().unwrap().remove(&id);
-            return Err(e);
-        }
-    };
-    let frames = capture.subscribe();
-    ws.send(Message::text(json!({"type": "hello", "id": id, "me": name, "stream": {"width": source.width, "height": source.height, "window": window.as_ref().map(|w| &w["address"])}, "output": {"width": source.width, "height": source.height}, "phone": phone.is_some()}).to_string()))?;
-    let my_output = || {
-        shared
-            .phones
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|(o, _)| o.clone())
-    };
-    ws.send(Message::text(state_for(my_output().as_deref()).to_string()))?;
-    if let Some(help) = shared.help.lock().unwrap().clone() {
-        ws.send(Message::text(
-            json!({"type": "help", "message": help}).to_string(),
-        ))?;
-    }
-    if let Some(by) = shared.taken_over.lock().unwrap().clone() {
-        ws.send(Message::text(
-            json!({"type": "control", "taken_over_by": by}).to_string(),
-        ))?;
-    }
-    broadcast_cursors(&shared);
-
-    ws.get_mut().set_nonblocking(true)?;
-    let mut waiting_for_key = false;
-    let result = (|| -> anyhow::Result<()> {
-        loop {
-            let mut idle = true;
-            // Video: send what's queued; if more than ~1/3 s is waiting the
-            // viewer is behind, so skip to the next keyframe.
-            let mut pending: Vec<_> = frames.try_iter().collect();
-            if pending.len() > 20 {
-                if let Some(k) = pending.iter().rposition(|f| f.key) {
-                    pending.drain(..k);
-                } else {
-                    pending.clear();
-                    waiting_for_key = true;
-                }
-            }
-            for frame in pending {
-                if waiting_for_key && !frame.key {
-                    continue;
-                }
-                // Skip unchanged-screen frames: nothing new to show.
-                if crate::stream::is_static(&frame) {
-                    continue;
-                }
-                waiting_for_key = false;
-                let mut msg = Vec::with_capacity(frame.data.len() + 10);
-                msg.push(1);
-                msg.push(u8::from(frame.key));
-                msg.extend(frame.pts_us.to_be_bytes());
-                msg.extend_from_slice(&frame.data);
-                // A slow phone link fills the socket: the frame stays queued
-                // in tungstenite and goes out on the next flush. Dropping the
-                // viewer here would cut it off mid-tap.
-                if !queued(ws.send(Message::binary(msg)))? {
-                    waiting_for_key = true;
-                    break;
-                }
-                idle = false;
-            }
-            for text in out_rx.try_iter() {
-                // "state_changed" becomes this viewer's own view of the state
-                // (a phone screen shows a different workspace than the desk).
-                let text = if text.contains("\"state_changed\"") {
-                    state_for(my_output().as_deref()).to_string()
-                } else {
-                    text
-                };
-                queued(ws.send(Message::text(text)))?;
-                idle = false;
-            }
-            // Anything still buffered from a full socket.
-            queued(ws.flush())?;
-            match ws.read() {
-                Ok(Message::Text(t)) => {
-                    idle = false;
-                    if let Ok(msg) = serde_json::from_str::<Value>(&t) {
-                        on_message(&shared, id, &name, &msg);
-                    }
-                }
-                Ok(Message::Close(_)) => return Ok(()),
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e.into()),
-            }
-            if idle {
-                std::thread::sleep(std::time::Duration::from_millis(4));
-            }
-        }
-    })();
-    shared.participants.lock().unwrap().remove(&id);
-    shared.outboxes.lock().unwrap().remove(&id);
-    // Stop this viewer's frames first: a recorder still running when its
-    // virtual screen is removed segfaults (wf-recorder in gbm_bo_get_fd).
-    drop(frames);
-    if source.virtual_output {
-        capture.stop();
-    }
-    shared.captures.stop_idle();
-    end_phone_screen(&shared, id);
-    // A take-over ends with the person who took over: the agent must not stay
-    // paused for a closed tab. (Takers are tracked by viewer id, not name.)
-    let taker = *shared.taken_by.lock().unwrap();
-    if taker == Some(id) {
-        set_control(&shared, None);
-    }
-    broadcast_cursors(&shared);
-    result
+    gliff_viewer(ws, shared, id, name, path, out_rx)
 }
 
 /// Input for a gliff session. Positions come as 0..1 of the stream and gliff
@@ -1645,52 +1412,8 @@ fn gliff_input(s: &crate::gliff::Session, event: Event) {
 /// primary monitor.
 fn send_input_for(shared: &Shared, id: u64, event: Event) {
     // Streamed by gliff: its own virtual devices take the input.
-    let session = shared.gliffs.lock().unwrap().get(&id).cloned();
-    if let Some(s) = session {
+    if let Some(s) = shared.gliffs.lock().unwrap().get(&id).cloned() {
         gliff_input(&s, event);
-        return;
-    }
-    let target = shared
-        .phones
-        .lock()
-        .unwrap()
-        .get(&id)
-        .map(|(o, _)| o.clone())
-        .unwrap_or_default();
-    let mut inputs = shared.input.lock().unwrap();
-    if !inputs.contains_key(&target) {
-        // Connecting the virtual devices is a few Wayland round trips. Do it
-        // on its own thread with a deadline: if the compositor is stuck, this
-        // viewer's input is dropped instead of every viewer blocking on it.
-        let (w, h, out) = if target.is_empty() {
-            (shared.output.1, shared.output.2, None)
-        } else {
-            // Absolute coordinates in a fine grid; the compositor maps them
-            // onto the bound output.
-            (10_000, 10_000, Some(target.clone()))
-        };
-        let (done_tx, done_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = done_tx.send(input::start(w, h, out.as_deref()));
-        });
-        let started = done_rx
-            .recv_timeout(std::time::Duration::from_secs(3))
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("the compositor didn't answer within 3s")));
-        match started {
-            Ok(tx) => {
-                inputs.insert(target.clone(), tx);
-            }
-            Err(e) => {
-                eprintln!("view: input for {target:?}: {e}");
-                return;
-            }
-        }
-    }
-    if inputs
-        .get(&target)
-        .is_some_and(|tx| tx.send(event).is_err())
-    {
-        inputs.remove(&target);
     }
 }
 
@@ -1699,88 +1422,6 @@ fn send_input_for(shared: &Shared, id: u64, event: Event) {
 fn monitor(name: &str) -> Option<Value> {
     let list = hypr::monitors_all().ok()?;
     list.as_array()?.iter().find(|m| m["name"] == name).cloned()
-}
-
-/// Create (or resize) a headless output at the phone's device pixels and
-/// scale, move `workspace` onto it, and return the stream source for it.
-/// Windows then tile for a tall narrow screen and apps get mobile widths.
-fn phone_screen(
-    shared: &Shared,
-    id: u64,
-    w: u32,
-    h: u32,
-    scale: f64,
-    workspace: i64,
-) -> anyhow::Result<Source> {
-    // Unique across restarts: viewer ids start again at 1, and a name still
-    // held by an old output can't be created again.
-    let name = format!("OSP-PHONE-{}-{id}", std::process::id());
-    // Hyprland only accepts a scale that divides the mode into whole logical
-    // pixels; round the size down to a multiple of the scale's denominator.
-    let scale = phone_scale(w, scale);
-    let step = scale_step(scale);
-    let fit = |v: u32| (v.clamp(320, 3000) / step * step).max(step);
-    let (w, h) = (fit(w), fit(h));
-    // Register the rule before the output exists, so Hyprland never applies
-    // Omarchy's catch-all `output = ""` rule (scale auto) to it first, which
-    // raises an "invalid scale" error banner on a phone-shaped size.
-    lua_dispatch_eval(&format!(
-        "hl.monitor({{ output = {}, mode = {}, position = \"auto-right\", scale = {} }})",
-        hypr::lua_string(&name),
-        hypr::lua_string(&format!("{w}x{h}@60")),
-        scale
-    ));
-    if monitor(&name).is_none() {
-        let phones = hypr::monitors_all()?.as_array().map_or(0, |a| {
-            // A disabled one shows nothing, so it doesn't count (the orphan
-            // sweep removes it).
-            a.iter()
-                .filter(|m| is_phone_screen(&m["name"]) && m["disabled"] != true)
-                .count()
-        });
-        anyhow::ensure!(
-            phones < MAX_PHONE_SCREENS,
-            "{phones} phone screens are already open on this machine; close a phone view first"
-        );
-        let out = hypr::ctl(
-            &["output", "create", "headless", &name],
-            std::time::Duration::from_secs(5),
-        )?;
-        anyhow::ensure!(out.contains("ok"), "could not create a virtual screen");
-    }
-    // Move the workspace: focus it on the primary monitor, then send it over.
-    lua_dispatch(&format!(
-        "hl.dsp.focus({{ monitor = {} }})",
-        hypr::lua_string(&shared.output.0)
-    ));
-    lua_dispatch(&format!(
-        "hl.dsp.focus({{ workspace = {} }})",
-        hypr::lua_string(&workspace.to_string())
-    ));
-    lua_dispatch(&format!(
-        "hl.dsp.workspace.move({{ monitor = {} }})",
-        hypr::lua_string(&name)
-    ));
-    // Keyboard input follows Hyprland's focus: focus the phone's screen.
-    lua_dispatch(&format!(
-        "hl.dsp.focus({{ monitor = {} }})",
-        hypr::lua_string(&name)
-    ));
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let m = monitor(&name).ok_or_else(|| anyhow::anyhow!("virtual screen vanished"))?;
-    shared
-        .phones
-        .lock()
-        .unwrap()
-        .insert(id, (name.clone(), workspace));
-    Ok(Source {
-        output: name,
-        region: None,
-        width: m["width"].as_u64().unwrap_or(u64::from(w)) as u32,
-        height: m["height"].as_u64().unwrap_or(u64::from(h)) as u32,
-        fps: 60,
-        virtual_output: true,
-    })
 }
 
 /// The narrowest a phone screen may be, in logical pixels: Chromium won't
@@ -1825,12 +1466,23 @@ fn scale_step(s: f64) -> u32 {
     (s * f64::from(q)).round() as u32
 }
 
-/// At most this many phone screens at once (one per phone watching): each is a
-/// real Hyprland output, and a runaway client must not be able to pile them up.
-const MAX_PHONE_SCREENS: usize = 4;
-
+/// A phone's private screen: gliff names its headless outputs `gliff-<pid>`
+/// (a gliff desktop client's own sessions are named the same way, so only a
+/// screen whose gliff-server has exited counts as left over; see below).
 fn is_phone_screen(name: &Value) -> bool {
-    name.as_str().is_some_and(|n| n.starts_with("OSP-PHONE-"))
+    name.as_str()
+        .is_some_and(|n| n.starts_with("gliff-") || n.starts_with("OSP-PHONE-"))
+}
+
+/// A screen whose gliff-server is still running belongs to a live session
+/// (ours, or someone's gliff window): never ours to remove.
+fn screen_in_use(name: &str) -> bool {
+    name.strip_prefix("gliff-")
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .is_some_and(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/exe"))
+                .is_ok_and(|exe| exe.file_name().is_some_and(|f| f == "gliff-server"))
+        })
 }
 
 /// Remove one phone screen without ever stalling the compositor's caller:
@@ -1906,6 +1558,7 @@ fn phone_screens_except(keep: &[String]) -> Vec<(String, Option<i64>, bool)> {
         .flatten()
         .filter(|m| is_phone_screen(&m["name"]))
         .filter(|m| !keep.iter().any(|k| m["name"] == k.as_str()))
+        .filter(|m| !screen_in_use(m["name"].as_str().unwrap_or("")))
         .map(|m| {
             (
                 m["name"].as_str().unwrap_or("").to_string(),
@@ -1939,13 +1592,9 @@ fn sweep_orphan_phone_screens(shared: &Shared, seen: &mut std::collections::Hash
         .values()
         .map(|(n, _)| n.clone())
         .collect();
-    let mine = format!("OSP-PHONE-{}-", std::process::id());
-    let orphans: Vec<_> = phone_screens_except(&owned)
-        .into_iter()
-        // Ours but not (yet) in `phones`: still being set up, or a disabled
-        // one whose viewer left. Only the disabled kind is ours to sweep.
-        .filter(|(n, _, disabled)| !n.starts_with(&mine) || *disabled)
-        .collect();
+    // Screens whose gliff-server is gone (it was killed before it could
+    // remove its screen), and the old recorder's from before 0.3.
+    let orphans = phone_screens_except(&owned);
     let now: std::collections::HashSet<String> =
         orphans.iter().map(|(n, _, _)| n.clone()).collect();
     let due: Vec<_> = orphans
@@ -1956,14 +1605,6 @@ fn sweep_orphan_phone_screens(shared: &Shared, seen: &mut std::collections::Hash
     if !due.is_empty() {
         remove_phone_screens(due, &shared.output.0);
     }
-}
-
-fn end_phone_screen(shared: &Shared, id: u64) {
-    let Some((name, workspace)) = shared.phones.lock().unwrap().remove(&id) else {
-        return;
-    };
-    shared.input.lock().unwrap().remove(&name);
-    remove_phone_screen(&name, Some(workspace), &shared.output.0, false);
 }
 
 /// In phone mode, bring workspace `target` onto this viewer's phone screen:

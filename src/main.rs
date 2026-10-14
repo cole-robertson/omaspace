@@ -18,7 +18,6 @@ mod snapshot;
 mod snss;
 mod sock;
 mod storage;
-mod stream;
 mod sync;
 mod tailnet;
 mod view;
@@ -257,7 +256,19 @@ fn main() -> anyhow::Result<()> {
             );
             cdp::broker(std::path::Path::new(socket), &rest[2..])
         }
-        Some("setup") => setup::run(&home()?),
+        Some("setup") => {
+            // Run from an ssh shell, setup still needs the desktop (gliff's
+            // check, the keybindings reload).
+            hypr::find_session();
+            setup::run(&home()?)
+        }
+        // Internal: whether the installed gliff-server works with this omaspace.
+        Some("gliff-check") => {
+            hypr::find_session();
+            gliff::check()?;
+            println!("gliff ok");
+            Ok(())
+        }
         _ => {
             println!("{USAGE}");
             Ok(())
@@ -446,7 +457,7 @@ pub fn remote_walk(peer: &str, root: &str) -> anyhow::Result<Vec<String>> {
 
 fn cmd_input(args: &[String]) -> anyhow::Result<()> {
     let mon = hypr::primary_monitor_size()?;
-    let tx = input::start(mon.0, mon.1, None)?;
+    let tx = input::start(mon.0, mon.1)?;
     let mut it = args.iter().map(String::as_str);
     let num =
         |v: Option<&str>| -> anyhow::Result<f64> { Ok(v.context("missing number")?.parse()?) };

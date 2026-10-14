@@ -54,8 +54,9 @@ install -m755 omaspace-*-x86_64-linux/omaspace ~/.local/bin/
 omaspace setup
 ```
 
-`omaspace setup` asks for your password once, to let Tailscale publish the
-live view. When it's done, it prints your live view's address, and
+`omaspace setup` asks for your password once, to install
+[gliff](https://github.com/omacom/gliff) if it isn't already (Omarchy's signed
+package) and let Tailscale publish the live view. When it's done, it prints your live view's address, and
 `omaspace peers` lists your other machines.
 
 If a machine is *tagged* in Tailscale (owned by a tag rather than by you),

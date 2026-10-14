@@ -2,7 +2,7 @@
 //! Idempotent; re-running replaces only what omaspace owns.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const UNIT: &str = include_str!("../dist/omaspace.service");
 const VIEW_UNIT: &str = include_str!("../dist/omaspace-view.service");
@@ -32,34 +32,6 @@ hl.bind("SUPER + mouse:272", hl.dsp.exec_cmd("omaspace-spaces-drag end"), { rele
 hl.window_rule({ match = { class = "^(omaspace-agent)$" }, suppress_event = "activate activatefocus" })
 hl.window_rule({ match = { class = "^(omaspace-agent-term)$" }, suppress_event = "activate activatefocus" })
 "#;
-
-/// Packages the live view needs: wf-recorder streams a phone-shaped screen
-/// (gpu-screen-recorder, which streams the desktop, ships with Omarchy).
-const PACKAGES: &[&str] = &["wf-recorder"];
-
-/// Install missing packages with Omarchy's own helper (one sudo prompt).
-fn install_packages() {
-    let missing: Vec<&str> = PACKAGES
-        .iter()
-        .copied()
-        .filter(|p| crate::omarchy::which(p).is_none())
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    println!("installing {} (for the phone view)", missing.join(", "));
-    let ok = Command::new("omarchy-pkg-add")
-        .args(&missing)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        println!(
-            "couldn't install {}: phones will see the whole desktop instead of a phone-shaped screen (install it with: sudo pacman -S {})",
-            missing.join(", "),
-            missing.join(" ")
-        );
-    }
-}
 
 /// A tagged machine belongs to no person, so it trusts only devices with
 /// its tags until told who its owners are. Offer the people on the tailnet.
@@ -125,28 +97,97 @@ fn ask(prompt: &str) -> Option<String> {
     Some(line.trim().to_string())
 }
 
-/// gliff (Omarchy's remote desktop) streams the live view. It comes from
-/// the Omarchy package repository; without it the view falls back to its
-/// own recorder.
-fn install_gliff() {
+/// Omarchy's package repository (edge carries gliff before stable does).
+const GLIFF_REPO: [&str; 2] = [
+    "https://pkgs.omarchy.org/stable/x86_64",
+    "https://pkgs.omarchy.org/edge/x86_64",
+];
+
+/// gliff (Omarchy's remote desktop) streams the live view: use the one that's
+/// installed, or install Omarchy's package. pacman checks it is signed by
+/// Omarchy's key, which the machine already trusts for its updates.
+fn install_gliff() -> anyhow::Result<()> {
     if crate::gliff::available() {
-        return;
+        crate::gliff::check().map_err(|e| {
+            anyhow::anyhow!("the installed gliff doesn't work with this omaspace: {e}. Update it (omarchy pkg add gliff, or rebuild it) and run setup again")
+        })?;
+        println!("using the installed gliff for the live view");
+        return Ok(());
     }
-    println!("installing gliff, which streams the live view (omarchy pkg add gliff)");
-    let ok = Command::new("omarchy-pkg-add")
+    println!("installing gliff, which streams the live view");
+    let from_repo = Command::new("omarchy-pkg-add")
         .arg("gliff")
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
-    if !ok {
-        println!(
-            "couldn't install gliff: the live view uses its own recorder instead. Install it when it's in your package repository (omarchy pkg add gliff), or from https://github.com/omacom/gliff"
-        );
+    if !from_repo {
+        // Not in the repositories this machine uses yet: the signed package.
+        let file = gliff_package()?;
+        let dir = std::env::temp_dir().join(format!("omaspace-gliff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let pkg = dir.join(&file.1);
+        for (url, to) in [
+            (format!("{}/{}", file.0, file.1), pkg.clone()),
+            (
+                format!("{}/{}.sig", file.0, file.1),
+                dir.join(format!("{}.sig", file.1)),
+            ),
+        ] {
+            run_cmd("curl", &["-fsSL", "-o", path_str(&to)?, &url])?;
+        }
+        let installed = Command::new("sudo")
+            .args(["pacman", "-U", "--noconfirm", "--needed"])
+            .arg(&pkg)
+            .status()
+            .is_ok_and(|s| s.success());
+        let _ = std::fs::remove_dir_all(&dir);
+        anyhow::ensure!(installed, "couldn't install gliff ({})", file.1);
     }
+    crate::gliff::check()?;
+    println!("installed gliff");
+    Ok(())
+}
+
+/// Where Omarchy's gliff package is: the repository and its file name, read
+/// from the repository's database (the first one carrying it).
+fn gliff_package() -> anyhow::Result<(&'static str, String)> {
+    for repo in GLIFF_REPO {
+        let db = std::env::temp_dir().join(format!("omaspace-omarchy-{}.db", std::process::id()));
+        let fetched = Command::new("curl")
+            .args(["-fsSL", "-o", path_str(&db)?, &format!("{repo}/omarchy.db")])
+            .status()
+            .is_ok_and(|s| s.success());
+        // tar recognises the compression (zstd) itself.
+        let listing = Command::new("tar")
+            .args(["-xOf", path_str(&db)?, "--wildcards", "gliff-[0-9]*/desc"])
+            .stderr(Stdio::null())
+            .output();
+        let _ = std::fs::remove_file(&db);
+        let Some(listing) = listing.ok().filter(|_| fetched) else {
+            continue;
+        };
+        let desc = String::from_utf8_lossy(&listing.stdout);
+        let mut lines = desc.lines();
+        if lines.any(|l| l == "%FILENAME%")
+            && let Some(file) = lines.next().filter(|f| {
+                f.starts_with("gliff-") && f.ends_with(".pkg.tar.zst") && !f.contains('/')
+            })
+        {
+            return Ok((repo, file.to_string()));
+        }
+    }
+    anyhow::bail!(
+        "gliff isn't in Omarchy's package repository; install it from https://github.com/omacom/gliff"
+    )
+}
+
+fn path_str(p: &Path) -> anyhow::Result<&str> {
+    p.to_str()
+        .ok_or_else(|| anyhow::anyhow!("{} isn't UTF-8", p.display()))
 }
 
 pub fn run(home: &Path) -> anyhow::Result<()> {
-    install_gliff();
-    install_packages();
+    install_gliff()?;
     if let Err(e) = owners_for_tagged_machine() {
         println!("couldn't check this machine's Tailscale owners: {e}");
     }

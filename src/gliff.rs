@@ -22,6 +22,76 @@ pub fn available() -> bool {
     crate::omarchy::which("gliff-server").is_some()
 }
 
+/// Whether the installed gliff-server speaks omaspace's protocol version:
+/// a greeting with nothing streamed. A mismatch comes back as gliff's own
+/// "Server version is too old" (or "Client …": update omaspace).
+pub fn check() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        available(),
+        "gliff-server isn't installed (omaspace setup installs it)"
+    );
+    let mut child = Command::new("gliff-server")
+        .args(["--stdio", "--headless"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let mut stdout = child.stdout.take().expect("piped");
+    let greeted = greet(&mut stdin, &mut stdout, &[ChromaMode::Single420]);
+    if greeted.is_err() {
+        let _ = child.kill();
+        let mut why = String::new();
+        let _ = child.stderr.take().map(|mut e| e.read_to_string(&mut why));
+        let _ = child.wait();
+        let last = why
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        return match greeted {
+            Err(e) if !last.is_empty() => Err(anyhow::anyhow!("{e} ({last})")),
+            other => other.map(|_| ()),
+        };
+    }
+    let _ = write_msg(&mut stdin, &ClientMsg::Bye, &[]);
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    greeted.map(|_| ())
+}
+
+/// Hello, and the server's answer: the output it streams.
+fn greet(
+    stdin: &mut ChildStdin,
+    stdout: &mut ChildStdout,
+    chroma: &[ChromaMode],
+) -> anyhow::Result<String> {
+    write_msg(
+        stdin,
+        &ClientMsg::Hello {
+            version: PROTOCOL_VERSION,
+            // Empty: the machine's own keymap (the viewer sends key
+            // codes, and the machine maps them as if typed there).
+            keymap: String::new(),
+            caps: ClientCaps {
+                codecs: vec![Codec::H264],
+                max_width: 4096,
+                max_height: 4096,
+                chroma: chroma.to_vec(),
+                features: features(),
+            },
+        },
+        &[],
+    )?;
+    match read_msg(stdout)? {
+        Some((ServerMsg::HelloAck { session, .. }, _)) => Ok(session.output),
+        Some((ServerMsg::Error { message, .. }, _)) => anyhow::bail!("gliff-server: {message}"),
+        _ => anyhow::bail!("gliff-server didn't greet"),
+    }
+}
+
 /// Write one message (and its payloads) in gliff's framing.
 fn write_msg(w: &mut impl Write, msg: &ClientMsg, payloads: &[&[u8]]) -> anyhow::Result<()> {
     let body = minicbor::to_vec(msg)?;
@@ -154,28 +224,7 @@ impl Session {
         } else {
             vec![ChromaMode::Single420]
         };
-        write_msg(
-            &mut stdin,
-            &ClientMsg::Hello {
-                version: PROTOCOL_VERSION,
-                // Empty: the machine's own keymap (the viewer sends key
-                // codes, and the machine maps them as if typed there).
-                keymap: String::new(),
-                caps: ClientCaps {
-                    codecs: vec![Codec::H264],
-                    max_width: 4096,
-                    max_height: 4096,
-                    chroma,
-                    features: features(),
-                },
-            },
-            &[],
-        )?;
-        let output = match read_msg(&mut stdout)? {
-            Some((ServerMsg::HelloAck { session, .. }, _)) => session.output,
-            Some((ServerMsg::Error { message, .. }, _)) => anyhow::bail!("gliff-server: {message}"),
-            _ => anyhow::bail!("gliff-server didn't greet"),
-        };
+        let output = greet(&mut stdin, &mut stdout, &chroma)?;
         write_msg(
             &mut stdin,
             &ClientMsg::Resize {

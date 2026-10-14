@@ -348,7 +348,6 @@ function connect() {
     const ws0 = state.active_workspace || params.get("workspace");
     if (ws0) q.set("workspace", String(ws0));
   }
-  if (params.get("window")) q.set("window", params.get("window"));
   // gliff stream options: full colour (sharp text) where WebGL2 can recombine
   // it, unless asked for low bandwidth; ?chroma=420 or ?low=1 override.
   const want444 = params.get("chroma") === "444" || (params.get("chroma") !== "420" && !phoneMode() && !!document.createElement("canvas").getContext("webgl2"));
@@ -360,7 +359,7 @@ function connect() {
     $("status").textContent = "live"; setLink("live");
     for (const m of pending.splice(0)) ws.send(JSON.stringify(m));
   };
-  ws.onclose = () => { $("status").textContent = "reconnecting…"; setLink("down"); resetDecoder(); setTimeout(connect, 1000); };
+  ws.onclose = () => { if (!unavailable) $("status").textContent = "reconnecting…"; setLink("down"); resetDecoder(); setTimeout(connect, unavailable ? 10000 : 1000); };
   ws.onmessage = e => typeof e.data === "string" ? onText(JSON.parse(e.data)) : onFrame(new Uint8Array(e.data));
 }
 // While (re)connecting, actions wait and go out once the socket opens, so a
@@ -394,7 +393,7 @@ function avcCodec(au) {
 }
 // gliff's stream config: size and whether the colour comes as two streams
 // (4:4:4 split into a main and an aux 4:2:0 stream, recombined here).
-let dual = false, auxDecoder = null, auxFrame = null, mainFrame = null, engine = "";
+let dual = false, auxDecoder = null, auxFrame = null, mainFrame = null;
 function onFrame(buf) {
   if (buf[0] === 2) {
     const dv = new DataView(buf.buffer, buf.byteOffset);
@@ -414,8 +413,6 @@ function onFrame(buf) {
     if (dual && aux.length) decodeAux(buf[1] === 1, Number(dv.getBigUint64(2)), aux);
     return onVideo(buf[1] === 1, Number(dv.getBigUint64(2)), main, buf.length);
   }
-  if (buf[0] !== 1) return;
-  onVideo(buf[1] === 1, Number(new DataView(buf.buffer, buf.byteOffset + 2, 8).getBigUint64(0)), buf.subarray(10), buf.length);
 }
 // ---- 4:4:4 (AVC444 as gliff sends it) ---------------------------------------
 // The main stream is ordinary 4:2:0; the aux stream carries the chroma the main
@@ -572,7 +569,7 @@ function onVideo(key, pts, data, size) {
   if (decoder.state !== "configured") return;
   if (decoder.decodeQueueSize > 3 && !key) {
     // gliff sends keyframes only when asked: ask, once per gap.
-    if (!needKey && engine === "gliff") send({ type: "keyframe" });
+    if (!needKey) send({ type: "keyframe" });
     needKey = true; dropped++; return;
   }
   needKey = false;
@@ -585,8 +582,12 @@ setInterval(() => {
 }, 1000);
 
 // ---- state: Omarchy workspaces, windows, people ----------------------------
+// The machine can't stream (gliff isn't installed or is the wrong version):
+// say so, and retry slowly until it can.
+let unavailable = false;
 function onText(m) {
-  if (m.type === "hello") engine = m.engine || "";
+  if (m.type === "unavailable") { unavailable = true; $("status").textContent = m.message; return; }
+  if (m.type === "hello") unavailable = false;
   if (m.type === "hello") { me = m.id; myName = m.me; stream = m.stream; outputSize = m.output || outputSize; $("host").textContent = location.hostname.split(".")[0]; }
   if (m.type === "state") $("asleep").classList.toggle("on", !!m.screen_off);
   if (m.type === "state") {
@@ -693,7 +694,7 @@ let panelKey = "";
 function renderPanel() {
   // Rebuild only when what it shows changed: state arrives on every Hyprland
   // event, and rebuilding under a finger (or a click) swallows the tap.
-  const key = JSON.stringify([state.focused, state.windows.map(w => [w.address, w.title, w.class, w.workspace, w.floating, w.fullscreen]), params.get("window")]);
+  const key = JSON.stringify([state.focused, state.windows.map(w => [w.address, w.title, w.class, w.workspace, w.floating, w.fullscreen])]);
   if (key === panelKey) return;
   panelKey = key;
   const p = $("panel"); p.innerHTML = `<div class="grab"></div>`;
@@ -728,16 +729,8 @@ function renderPanel() {
       mv.innerHTML = `<option>Move to…</option>` + [1,2,3,4,5,6,7,8,9].map(n => `<option value="${n}">${n}</option>`).join("");
       mv.onchange = () => { if (+mv.value) send({ type: "move_window", address: w.address, workspace: +mv.value }); mv.selectedIndex = 0; };
       acts.append(mv);
-      const solo = document.createElement("button"); solo.innerHTML = '<span class="i">\u{f0349}</span>'; solo.title = "View only this";
-      solo.onclick = () => { location.search = new URLSearchParams({ ...Object.fromEntries(params), window: w.address }); };
-      acts.append(solo);
       p.append(d);
     }
-  }
-  if (params.get("window")) {
-    const all = document.createElement("button"); all.textContent = "Back to whole desktop";
-    all.onclick = () => { params.delete("window"); location.search = params; };
-    p.prepend(all);
   }
 }
 let lastAgents = [];
@@ -827,8 +820,8 @@ function reshapePhone() {
     // Small changes (a few pixels of browser chrome) aren't worth a new screen.
     if (Math.abs(w1 - w0) < 24 && Math.abs(h1 - h0) < 48) return;
     // gliff resizes the phone's screen in place: same screen, same workspace,
-    // no reconnect. omaspace's own recorder needs a new screen.
-    if (engine === "gliff" && ws && ws.readyState === 1) {
+    // no reconnect. Not connected: the next connection asks for the new shape.
+    if (ws && ws.readyState === 1) {
       phoneShape = shape;
       send({ type: "phone_resize", width: w1, height: h1, scale: Math.min(3, Math.max(1, devicePixelRatio)) });
       return;

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 - 2026-10-14
+
+**The live view runs only on gliff.** omaspace's own screen recorder is gone
+(about 900 lines): gliff is faster, sharper and steadier on every measure, so
+there's no reason to keep a second way.
+
+- **Setup installs gliff,** or uses the one already installed. It installs
+  Omarchy's package, signed with the key the machine already trusts for its
+  updates, from the stable repository or, until gliff reaches stable, from
+  edge. Setup and the live view check that gliff speaks omaspace's protocol
+  version, and the page says so when it doesn't, instead of reconnecting.
+- **Agents set up themselves.** Setup registers the MCP server with Claude
+  Code, Codex and opencode (`omaspace mcp add` again later), and `omaspace
+  mcp` finds the desktop on its own, so agents started by a service need no
+  wrapper script. A registration that's already there is kept by setup.
+- **Phone screens left behind are cleaned up** by gliff's names too (only
+  ones whose gliff-server has exited).
+- **Scales like 1.4 and 1.8** find their clean size (the same fix as
+  omacom/gliff#46).
+- **Removed:** "View only this window" (gliff streams whole screens; the
+  window's workspace is the way to watch it) and the wf-recorder dependency.
+
 ## 0.2.0 - 2026-10-12
 
 **The live view runs on [gliff](https://github.com/omacom/gliff),** Omarchy's

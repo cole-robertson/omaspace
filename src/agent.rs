@@ -576,7 +576,11 @@ mod take_over {
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
         std::fs::create_dir_all(h.join(".local/state/omaspace")).unwrap();
-        std::fs::write(h.join(".local/state/omaspace/agents.json"), r#"{"spaces":[]}"#).unwrap();
+        std::fs::write(
+            h.join(".local/state/omaspace/agents.json"),
+            r#"{"spaces":[]}"#,
+        )
+        .unwrap();
         super::set_taken_over(h, Some("  ")).unwrap();
         assert_eq!(
             super::taken_over_by(h).as_deref(),

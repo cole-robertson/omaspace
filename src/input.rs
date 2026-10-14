@@ -1,14 +1,15 @@
-//! Viewer input into Hyprland through a Wayland virtual pointer
+//! `omaspace input`: input into Hyprland through a Wayland virtual pointer
 //! (`zwlr_virtual_pointer_v1`) and virtual keyboard (`zwp_virtual_keyboard_v1`).
 //! These are real input devices to the compositor, so Hyprland keybindings
-//! (SUPER+…) fire exactly as they do for a physical keyboard.
+//! (SUPER+…) fire exactly as they do for a physical keyboard. (The live
+//! view's input goes through gliff; this drives the desktop from a script.)
 //!
 //! The keyboard uses a plain US keymap compiled by `xkbcli`, so key names map
 //! to Linux evdev codes directly.
 
 use std::os::fd::AsFd;
 use std::sync::mpsc;
-use wayland_client::protocol::{wl_output, wl_registry, wl_seat};
+use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{
     Connection, Dispatch, QueueHandle, globals::GlobalListContents, globals::registry_queue_init,
 };
@@ -47,9 +48,7 @@ pub enum Event {
 }
 
 #[derive(Default)]
-struct State {
-    names: Vec<(u32, String)>,
-}
+struct State;
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(
@@ -68,21 +67,6 @@ macro_rules! ignore_events {
             fn event(_: &mut Self, _: &$t, _: <$t as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
         }
     )*};
-}
-/// Output names, learned from wl_output.name (version 4+).
-impl Dispatch<wl_output::WlOutput, u32> for State {
-    fn event(
-        state: &mut Self,
-        _: &wl_output::WlOutput,
-        event: wl_output::Event,
-        id: &u32,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let wl_output::Event::Name { name } = event {
-            state.names.push((*id, name));
-        }
-    }
 }
 ignore_events!(
     wl_seat::WlSeat,
@@ -106,54 +90,17 @@ fn us_keymap() -> anyhow::Result<std::fs::File> {
 }
 
 /// Start the input thread; send `Event`s to it. Fails if the compositor
-/// doesn't offer the virtual input protocols. With `output`, the pointer's
-/// absolute coordinates map onto that output only (phone mode's virtual
-/// screen); otherwise onto the primary output's `width`x`height`.
-pub fn start(width: u32, height: u32, output: Option<&str>) -> anyhow::Result<mpsc::Sender<Event>> {
+/// doesn't offer the virtual input protocols. Pointer positions map onto the
+/// primary output's `width`x`height`.
+pub fn start(width: u32, height: u32) -> anyhow::Result<mpsc::Sender<Event>> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
     let qh = queue.handle();
-    let mut st = State::default();
+    let mut st = State;
     let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=7, ())?;
     let pointer_mgr: ZwlrVirtualPointerManagerV1 = globals.bind(&qh, 1..=2, ())?;
     let keyboard_mgr: ZwpVirtualKeyboardManagerV1 = globals.bind(&qh, 1..=1, ())?;
-    let mut target_output = None;
-    if let Some(want) = output {
-        let outputs: Vec<(u32, wl_output::WlOutput)> = globals.contents().with_list(|list| {
-            list.iter()
-                .filter(|g| g.interface == "wl_output")
-                .map(|g| {
-                    (
-                        g.name,
-                        globals.registry().bind::<wl_output::WlOutput, _, _>(
-                            g.name,
-                            g.version.min(4),
-                            &qh,
-                            g.name,
-                        ),
-                    )
-                })
-                .collect()
-        });
-        queue.roundtrip(&mut st)?;
-        target_output = st
-            .names
-            .iter()
-            .find(|(_, n)| n == want)
-            .and_then(|(id, _)| {
-                outputs
-                    .iter()
-                    .find(|(g, _)| g == id)
-                    .map(|(_, o)| o.clone())
-            });
-        anyhow::ensure!(target_output.is_some(), "output {want} not found");
-    }
-    let pointer = match &target_output {
-        Some(out) if wayland_client::Proxy::version(&pointer_mgr) >= 2 => {
-            pointer_mgr.create_virtual_pointer_with_output(Some(&seat), Some(out), &qh, ())
-        }
-        _ => pointer_mgr.create_virtual_pointer(Some(&seat), &qh, ()),
-    };
+    let pointer = pointer_mgr.create_virtual_pointer(Some(&seat), &qh, ());
     let keyboard = keyboard_mgr.create_virtual_keyboard(&seat, &qh, ());
     let keymap = us_keymap()?;
     let size = keymap.metadata()?.len() as u32;
@@ -247,7 +194,7 @@ pub fn start(width: u32, height: u32, output: Option<&str>) -> anyhow::Result<mp
                     .map(|_| ())
                     .map_err(anyhow::Error::from)
             }) {
-                eprintln!("view: input connection lost ({e}); reconnecting on the next event");
+                eprintln!("input: connection lost ({e})");
                 break;
             }
         }

@@ -145,7 +145,7 @@ pub fn find_session() {
         .flatten()
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name())))
         .collect();
-    instances.sort_by(|a, b| b.0.cmp(&a.0));
+    instances.sort_by_key(|e| std::cmp::Reverse(e.0));
     for (_, name) in instances {
         // SAFETY: single-threaded at startup, before anything reads the env.
         unsafe {
