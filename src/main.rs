@@ -239,7 +239,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&client::spaces()?)?);
             Ok(())
         }
-        Some("mcp") if rest.first().map(String::as_str) == Some("add") => setup::add_mcp(),
+        Some("mcp") if rest.first().map(String::as_str) == Some("add") => setup::add_mcp(true),
         Some("mcp") => {
             hypr::find_session();
             mcp::run()

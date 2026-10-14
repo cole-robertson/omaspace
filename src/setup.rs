@@ -256,7 +256,7 @@ pub fn run(home: &Path) -> anyhow::Result<()> {
         );
     }
 
-    add_mcp()?;
+    add_mcp(false)?;
 
     let bindings = home.join(".config/hypr/bindings.lua");
     if bindings.is_file() {
@@ -325,7 +325,9 @@ fn publish_view() -> anyhow::Result<()> {
 
 /// Register the MCP server with each agent CLI installed here, through its
 /// own `mcp add`, so agents get their spaces without editing configs by hand.
-pub fn add_mcp() -> anyhow::Result<()> {
+/// Setup keeps a registration that's already there (it may point elsewhere,
+/// like another machine); `omaspace mcp add` replaces it.
+pub fn add_mcp(replace: bool) -> anyhow::Result<()> {
     let me = std::env::current_exe()?;
     let me = me
         .to_str()
@@ -346,13 +348,24 @@ pub fn add_mcp() -> anyhow::Result<()> {
         if !found.status.success() {
             continue;
         }
-        // Replace an earlier registration (an older path or a wrapper script).
-        let remove: &[&str] = if cli == "claude" {
-            &["mcp", "remove", "-s", "user", "omaspace"]
-        } else {
-            &["mcp", "remove", "omaspace"]
-        };
-        let _ = Command::new(cli).args(remove).output();
+        let there = Command::new(cli)
+            .args(["mcp", "get", "omaspace"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if there && !replace {
+            println!(
+                "{cli} already has an omaspace MCP server: kept it (`omaspace mcp add` replaces it)"
+            );
+            continue;
+        }
+        if there {
+            let remove: &[&str] = if cli == "claude" {
+                &["mcp", "remove", "-s", "user", "omaspace"]
+            } else {
+                &["mcp", "remove", "omaspace"]
+            };
+            let _ = Command::new(cli).args(remove).output();
+        }
         match Command::new(cli).args(&args).output() {
             Ok(o) if o.status.success() => println!("added the omaspace MCP server to {cli}"),
             _ => println!(
@@ -381,6 +394,12 @@ pub fn add_mcp() -> anyhow::Result<()> {
                 }
             },
         };
+        if config["mcp"].get("omaspace").is_some() && !replace {
+            println!(
+                "opencode already has an omaspace MCP server: kept it (`omaspace mcp add` replaces it)"
+            );
+            return Ok(());
+        }
         config["mcp"]["omaspace"] = serde_json::json!({"type": "local", "command": [me, "mcp"]});
         std::fs::write(&path, serde_json::to_string_pretty(&config)? + "\n")?;
         println!("added the omaspace MCP server to opencode");
