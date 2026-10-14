@@ -64,7 +64,12 @@ struct Store {
 /// the requests are cleared rather than shown again after hand back.
 pub fn set_taken_over(home: &Path, by: Option<&str>) -> anyhow::Result<()> {
     with_store(home, |store| {
-        store.taken_over_by = by.map(|b| b.chars().take(80).collect());
+        // A viewer with no name (tailnet whois without a host) still holds
+        // the agents; "" would read as taken over yet show nobody.
+        store.taken_over_by = by.map(|b| match b.trim() {
+            "" => "someone in the live view".to_string(),
+            b => b.chars().take(80).collect(),
+        });
         if by.is_some() {
             for s in &mut store.spaces {
                 if s.help.take().is_some() {
@@ -564,6 +569,22 @@ mod take_over {
         super::set_taken_over(h, None).unwrap();
         assert_eq!(super::taken_over_by(h), None);
         assert_eq!(super::space_of(h, "A").unwrap().help, None);
+    }
+
+    #[test]
+    fn a_viewer_with_no_name_still_shows_who_took_over_and_hands_back() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".local/state/omaspace")).unwrap();
+        std::fs::write(h.join(".local/state/omaspace/agents.json"), r#"{"spaces":[]}"#).unwrap();
+        super::set_taken_over(h, Some("  ")).unwrap();
+        assert_eq!(
+            super::taken_over_by(h).as_deref(),
+            Some("someone in the live view"),
+            "an unnamed viewer is named, not an empty string"
+        );
+        super::set_taken_over(h, None).unwrap();
+        assert_eq!(super::taken_over_by(h), None);
     }
 }
 
