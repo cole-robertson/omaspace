@@ -130,7 +130,9 @@ machine.
 The live view is at `https://<machine>.<your-tailnet>.ts.net:7788` from any of
 your devices; add it to your phone's home screen.
 
-For agents, add the MCP server to your agent's config:
+For agents, setup registers the MCP server with Claude Code, Codex and
+opencode if they're installed (`omaspace mcp add` does it again later). For
+any other agent, add it to its config:
 
 ```json
 { "mcpServers": { "omaspace": { "command": "omaspace", "args": ["mcp"] } } }

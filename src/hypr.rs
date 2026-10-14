@@ -131,6 +131,36 @@ pub fn available() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && hyprctl(&["-j", "version"]).is_ok()
 }
 
+/// Point this process at the desktop when it was started without it (an agent
+/// launched by a service): the newest Hyprland instance that answers, since
+/// dead ones from earlier sessions linger. Call before starting threads.
+pub fn find_session() {
+    if available() {
+        return;
+    }
+    let run = crate::sock::runtime_dir();
+    let mut instances: Vec<_> = std::fs::read_dir(run.join("hypr"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name())))
+        .collect();
+    instances.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, name) in instances {
+        // SAFETY: single-threaded at startup, before anything reads the env.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
+            std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", &name);
+        }
+        if available() {
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+                unsafe { std::env::set_var("WAYLAND_DISPLAY", "wayland-1") };
+            }
+            return;
+        }
+    }
+}
+
 pub fn clients() -> anyhow::Result<Vec<Client>> {
     Ok(serde_json::from_str(&hyprctl(&["-j", "clients"])?)?)
 }

@@ -51,6 +51,7 @@ const USAGE: &str = "omaspace — move Omarchy workspaces between your machines 
   omaspace serve
   omaspace setup                               user service + Omarchy keybindings
   omaspace mcp                                 agent tools over stdio
+  omaspace mcp add                             register it with Claude Code, Codex, opencode
   omaspace view                                live Omarchy view for browsers ($XDG_RUNTIME_DIR/omaspace-view.sock,
                                                publish with tailscale serve --https=7788 unix:<socket>)";
 
@@ -238,7 +239,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&client::spaces()?)?);
             Ok(())
         }
-        Some("mcp") => mcp::run(),
+        Some("mcp") if rest.first().map(String::as_str) == Some("add") => setup::add_mcp(),
+        Some("mcp") => {
+            hypr::find_session();
+            mcp::run()
+        }
         Some("view") => view::serve(),
         // Internal: started by open_browser to hold an agent browser's
         // DevTools pipe and relay it on a private socket.

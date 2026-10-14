@@ -256,6 +256,8 @@ pub fn run(home: &Path) -> anyhow::Result<()> {
         );
     }
 
+    add_mcp()?;
+
     let bindings = home.join(".config/hypr/bindings.lua");
     if bindings.is_file() {
         let text = std::fs::read_to_string(&bindings)?;
@@ -319,6 +321,77 @@ fn publish_view() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Register the MCP server with each agent CLI installed here, through its
+/// own `mcp add`, so agents get their spaces without editing configs by hand.
+pub fn add_mcp() -> anyhow::Result<()> {
+    let me = std::env::current_exe()?;
+    let me = me
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("omaspace's path isn't UTF-8"))?;
+    for (cli, args) in [
+        (
+            "claude",
+            vec!["mcp", "add", "-s", "user", "omaspace", "--", me, "mcp"],
+        ),
+        ("codex", vec!["mcp", "add", "omaspace", "--", me, "mcp"]),
+    ] {
+        let Ok(found) = Command::new("sh")
+            .args(["-c", &format!("command -v {cli}")])
+            .output()
+        else {
+            continue;
+        };
+        if !found.status.success() {
+            continue;
+        }
+        // Replace an earlier registration (an older path or a wrapper script).
+        let remove: &[&str] = if cli == "claude" {
+            &["mcp", "remove", "-s", "user", "omaspace"]
+        } else {
+            &["mcp", "remove", "omaspace"]
+        };
+        let _ = Command::new(cli).args(remove).output();
+        match Command::new(cli).args(&args).output() {
+            Ok(o) if o.status.success() => println!("added the omaspace MCP server to {cli}"),
+            _ => println!(
+                "couldn't add the MCP server to {cli}: run `{cli} {}`",
+                args.join(" ")
+            ),
+        }
+    }
+    // opencode's `mcp add` only asks interactively: set its config instead.
+    if let Some(dir) = dirs_config()
+        .map(|c| c.join("opencode"))
+        .filter(|d| d.is_dir())
+    {
+        let path = dir.join("opencode.json");
+        let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
+            Err(_) => serde_json::json!({"$schema": "https://opencode.ai/config.json"}),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(config) => config,
+                // Comments or trailing commas: don't rewrite what we can't read.
+                Err(_) => {
+                    println!(
+                        "couldn't read {}: add omaspace under \"mcp\" by hand",
+                        path.display()
+                    );
+                    return Ok(());
+                }
+            },
+        };
+        config["mcp"]["omaspace"] = serde_json::json!({"type": "local", "command": [me, "mcp"]});
+        std::fs::write(&path, serde_json::to_string_pretty(&config)? + "\n")?;
+        println!("added the omaspace MCP server to opencode");
+    }
+    Ok(())
+}
+
+fn dirs_config() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(Into::into)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
