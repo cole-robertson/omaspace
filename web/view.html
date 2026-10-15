@@ -25,7 +25,9 @@
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin:0; height:100%; background:var(--panel); color:var(--fg); font:13px/1.4 "JetBrainsMono Nerd Font", "OmarchyMono", ui-monospace, monospace; }
-  body { display:grid; grid-template-rows:auto 1fr auto; height:100dvh; overscroll-behavior:none; -webkit-user-select:none; user-select:none; }
+  /* One column no wider than the screen: a full top bar (presence, agents)
+     must scroll its workspaces, not widen the page past a phone's width. */
+  body { display:grid; grid-template-rows:auto 1fr auto; grid-template-columns:minmax(0, 1fr); height:100dvh; overscroll-behavior:none; -webkit-user-select:none; user-select:none; }
   /* Home-screen app on iOS: 100dvh stops short of the screen (it leaves the
      area under the home bar), so fill the whole window instead. */
   @media (display-mode: standalone) { html, body { height:100vh; } body { position:fixed; inset:0; height:auto; } }

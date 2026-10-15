@@ -1453,7 +1453,9 @@ fn clean_scale(s: f64) -> f64 {
 }
 
 /// The size multiple that makes `size / scale` a whole number: for scale p/q
-/// in lowest terms, sizes must be multiples of p (3 → 3, 2.5 → 5, 1.25 → 5).
+/// in lowest terms, sizes must be multiples of p, kept even for the encoder
+/// (3 → 6, 2.5 → 10, 2 → 2). gliff rounds a headless screen the same way, so
+/// the size asked for is the size the screen comes up at.
 fn scale_step(s: f64) -> u32 {
     let q = (1..=8)
         .find(|d| {
@@ -1463,7 +1465,8 @@ fn scale_step(s: f64) -> u32 {
             (n - n.round()).abs() < 1e-4
         })
         .unwrap_or(4);
-    (s * f64::from(q)).round() as u32
+    let p = (s * f64::from(q)).round() as u32;
+    if p.is_multiple_of(2) { p } else { 2 * p }
 }
 
 /// A phone's private screen: gliff names its headless outputs `gliff-<pid>`
@@ -2011,12 +2014,12 @@ mod tests {
     fn phone_screens_use_scales_hyprland_accepts() {
         assert_eq!(super::clean_scale(2.6), 2.5);
         assert_eq!(super::clean_scale(3.0), 3.0);
-        assert_eq!(super::scale_step(2.5), 5);
-        assert_eq!(super::scale_step(1.25), 5);
-        assert_eq!(super::scale_step(3.0), 3);
+        assert_eq!(super::scale_step(2.5), 10);
+        assert_eq!(super::scale_step(1.25), 10);
+        assert_eq!(super::scale_step(3.0), 6);
         assert_eq!(super::scale_step(2.0), 2);
-        assert_eq!(super::scale_step(f64::from(1.4f32)), 7);
-        assert_eq!(super::scale_step(f64::from(1.8f32)), 9);
+        assert_eq!(super::scale_step(f64::from(1.4f32)), 14);
+        assert_eq!(super::scale_step(f64::from(1.8f32)), 18);
     }
 
     #[test]
