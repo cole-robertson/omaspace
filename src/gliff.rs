@@ -17,20 +17,19 @@ use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 
-/// Whether gliff-server is installed.
-pub fn available() -> bool {
-    crate::omarchy::which("gliff-server").is_some()
-}
-
 /// Whether the installed gliff-server speaks omaspace's protocol version:
 /// a greeting with nothing streamed. A mismatch comes back as gliff's own
 /// "Server version is too old" (or "Client …": update omaspace).
 pub fn check() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        available(),
-        "gliff-server isn't installed (omaspace setup installs it)"
-    );
-    let mut child = Command::new("gliff-server")
+    let bin = crate::omarchy::which("gliff-server").ok_or_else(|| {
+        anyhow::anyhow!("gliff-server isn't installed (omaspace setup installs it)")
+    })?;
+    check_at(&bin)
+}
+
+/// `check` for one gliff-server binary.
+pub fn check_at(bin: &std::path::Path) -> anyhow::Result<()> {
+    let mut child = Command::new(bin)
         .args(["--stdio", "--headless"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -60,6 +59,13 @@ pub fn check() -> anyhow::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     greeted.map(|_| ())
+}
+
+/// What a gliff-server binary says it is ("gliff-server 0.3.1").
+pub fn version(bin: &std::path::Path) -> Option<String> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    let v = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (out.status.success() && !v.is_empty()).then_some(v)
 }
 
 /// Hello, and the server's answer: the output it streams.

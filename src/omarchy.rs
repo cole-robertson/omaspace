@@ -215,9 +215,13 @@ pub fn which(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         return Path::new(bin).is_file().then(|| PathBuf::from(bin));
     }
-    std::env::var_os("PATH")?
-        .to_str()?
-        .split(':')
+    which_in(bin, std::env::var_os("PATH")?.to_str()?)
+}
+
+/// `which` against a given PATH (another process's, like the user services').
+pub fn which_in(bin: &str, path: &str) -> Option<PathBuf> {
+    path.split(':')
+        .filter(|d| !d.is_empty())
         .map(|d| Path::new(d).join(bin))
         .find(|p| p.is_file())
 }
@@ -225,6 +229,24 @@ pub fn which(bin: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn which_in_takes_the_first_match_on_the_given_path() {
+        let root = std::env::temp_dir().join(format!("omaspace-which-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("tool"), "").unwrap();
+        }
+        let path = format!("{}::{}", b.display(), a.display());
+        assert_eq!(which_in("tool", &path), Some(b.join("tool")));
+        assert_eq!(
+            which_in("tool", &root.join("none").display().to_string()),
+            None
+        );
+        assert_eq!(which_in("tool", ""), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn every_chromium_browser_omarchy_supports_is_known() {

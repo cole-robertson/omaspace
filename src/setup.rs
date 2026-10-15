@@ -105,14 +105,24 @@ const GLIFF_REPO: [&str; 2] = [
 
 /// gliff (Omarchy's remote desktop) streams the live view: use the one that's
 /// installed, or install Omarchy's package. pacman checks it is signed by
-/// Omarchy's key, which the machine already trusts for its updates.
+/// Omarchy's key, which the machine already trusts for its updates. The
+/// gliff that counts is the one the view's service finds on its own PATH,
+/// which can differ from this shell's.
 fn install_gliff() -> anyhow::Result<()> {
-    if crate::gliff::available() {
-        crate::gliff::check().map_err(|e| {
-            anyhow::anyhow!("the installed gliff doesn't work with this omaspace: {e}. Update it (omarchy pkg add gliff, or rebuild it) and run setup again")
+    let path = service_path();
+    let found = || crate::omarchy::which_in("gliff-server", &path);
+    if let Some(bin) = found() {
+        crate::gliff::check_at(&bin).map_err(|e| {
+            anyhow::anyhow!("{} doesn't work with this omaspace: {e}. Update it (omarchy pkg add gliff, or rebuild it) and run setup again", bin.display())
         })?;
-        println!("using the installed gliff for the live view");
+        println!("using {} for the live view", describe_gliff(&bin));
         return Ok(());
+    }
+    if let Some(bin) = crate::omarchy::which("gliff-server") {
+        anyhow::bail!(
+            "{} isn't on the PATH omaspace's services run with ({path}), so the live view wouldn't find it. Put it in a folder on that PATH, or remove it to use Omarchy's package, and run setup again",
+            bin.display()
+        );
     }
     println!("installing gliff, which streams the live view");
     let from_repo = Command::new("omarchy-pkg-add")
@@ -143,9 +153,39 @@ fn install_gliff() -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(&dir);
         anyhow::ensure!(installed, "couldn't install gliff ({})", file.1);
     }
-    crate::gliff::check()?;
-    println!("installed gliff");
+    let bin = found().ok_or_else(|| {
+        anyhow::anyhow!(
+            "installed gliff, but omaspace's service can't find gliff-server on its PATH ({path})"
+        )
+    })?;
+    crate::gliff::check_at(&bin)?;
+    println!("installed {}", describe_gliff(&bin));
     Ok(())
+}
+
+/// The PATH omaspace's user services run with: the user manager's, as the
+/// units set none of their own. This shell's when there's no user manager.
+fn service_path() -> String {
+    Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|env| {
+            env.lines()
+                .find_map(|l| l.strip_prefix("PATH="))
+                .map(str::to_owned)
+        })
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default()
+}
+
+/// "gliff-server 0.3.1 (/usr/bin/gliff-server)".
+fn describe_gliff(bin: &Path) -> String {
+    let name = crate::gliff::version(bin).unwrap_or_else(|| "gliff-server".into());
+    format!("{name} ({})", bin.display())
 }
 
 /// Where Omarchy's gliff package is: the repository and its file name, read
