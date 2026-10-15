@@ -56,9 +56,23 @@ pub fn check_at(bin: &std::path::Path) -> anyhow::Result<()> {
     }
     let _ = write_msg(&mut stdin, &ClientMsg::Bye, &[]);
     drop(stdin);
+    // Its headless screen is already up: let it remove it, or the screen
+    // stays behind (taking a workspace) until the view's sweep finds it.
+    wait_or_kill(&mut child);
+    greeted.map(|_| ())
+}
+
+/// Give a gliff-server that was told Bye a second to exit (removing its
+/// headless output on the way), then kill it.
+fn wait_or_kill(child: &mut Child) {
+    for _ in 0..20 {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let _ = child.kill();
     let _ = child.wait();
-    greeted.map(|_| ())
 }
 
 /// What a gliff-server binary says it is ("gliff-server 0.3.1").
@@ -470,16 +484,7 @@ impl Session {
 
     pub fn stop(&self) {
         let _ = self.send(&ClientMsg::Bye);
-        let mut child = self.child.lock().unwrap();
-        // Give it a moment to remove its headless output cleanly.
-        for _ in 0..20 {
-            if child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+        wait_or_kill(&mut self.child.lock().unwrap());
     }
 }
 
