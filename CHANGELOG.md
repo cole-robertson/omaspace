@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **The live view works on a machine with no monitor.** It mirrored the
+  screen it found at startup, so unplugging the monitor (or a machine that
+  never had one, where Hyprland shows its own FALLBACK screen) left gliff
+  looking for a screen that was gone. It now asks which screen is real each
+  time. A phone switching workspaces there no longer tries to hand the old
+  one to a screen that isn't there, and a laptop joining while a phone's
+  screen is the only one watches that.
+- **Tests for a machine with no monitor and for a hub:** giving to and taking
+  from a headless machine, watching it from a phone and a laptop, and
+  stashing to and restoring from a hub.
+
 ## 0.3.1 - 2026-10-15
 
 Fixes found testing with gliff 0.4.0.

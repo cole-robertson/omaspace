@@ -44,6 +44,11 @@ some of them first, so run them on a machine you aren't working on, or keep
 your windows on workspaces 1 to 4. The agent tests restart the desk's
 Chromium. Everything a test creates is cleaned up after it, pass or fail.
 
+Two spec files change the desk for their run and put it back after:
+`headless` switches its monitor off (a timer on the desk switches it back on
+after ten minutes if the run dies), and `hub` runs its daemon without the
+desktop for a minute, as a plain server would.
+
 The HTML report, with screenshots and traces of failures, is left in
 `e2e/report/`: `npx playwright show-report e2e/report`.
 

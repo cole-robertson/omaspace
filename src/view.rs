@@ -67,14 +67,14 @@ struct Shared {
     taken_by: Mutex<Option<u64>>,
     help: Mutex<Option<String>>,
     next_id: Mutex<u64>,
-    output: (String, u32, u32),
 }
 
 pub fn serve() -> anyhow::Result<()> {
     let me = tailnet::me()?;
     let origin = view_origin(&tailnet::my_dns_name()?);
-    let output = primary_output()?;
-    remove_stale_phone_screens(&output.0);
+    if let Ok((primary, _, _)) = primary_output() {
+        remove_stale_phone_screens(&primary);
+    }
     // A take-over belongs to a viewer, and a restart closes every viewer:
     // don't leave agents paused by a person who is no longer connected.
     let home = std::env::var_os("HOME")
@@ -94,7 +94,6 @@ pub fn serve() -> anyhow::Result<()> {
         taken_by: Mutex::new(None),
         help: Mutex::new(None),
         next_id: Mutex::new(1),
-        output,
     });
     spawn_hyprland_events(shared.clone());
     // Agent spaces change in other processes (each agent's MCP server):
@@ -224,6 +223,10 @@ fn forwarded_ip(headers: &HashMap<String, String>) -> anyhow::Result<&str> {
     Ok(ip)
 }
 
+/// The real screen to mirror: the first enabled one that isn't a phone's.
+/// Asked each time, not kept: unplugging the monitor (or a machine with none,
+/// where Hyprland makes its own FALLBACK screen) changes it while the view
+/// runs, and a name kept from startup would point gliff at nothing.
 fn primary_output() -> anyhow::Result<(String, u32, u32)> {
     let monitors: Value = serde_json::from_str(&hypr::ctl(
         &["-j", "monitors"],
@@ -231,7 +234,21 @@ fn primary_output() -> anyhow::Result<(String, u32, u32)> {
     )?)?;
     let m = monitors
         .as_array()
-        .and_then(|a| a.first())
+        .and_then(|a| a.iter().find(|m| !is_phone_screen(&m["name"])))
+        .ok_or_else(|| anyhow::anyhow!("no monitor"))?;
+    Ok((
+        m["name"].as_str().unwrap_or("").to_string(),
+        m["width"].as_u64().unwrap_or(1920) as u32,
+        m["height"].as_u64().unwrap_or(1080) as u32,
+    ))
+}
+
+/// Any enabled screen, a phone's included.
+fn any_output() -> anyhow::Result<(String, u32, u32)> {
+    let monitors = hypr::monitors_all()?;
+    let m = monitors
+        .as_array()
+        .and_then(|a| a.iter().find(|m| m["disabled"] != true))
         .ok_or_else(|| anyhow::anyhow!("no monitor"))?;
     Ok((
         m["name"].as_str().unwrap_or("").to_string(),
@@ -1093,9 +1110,12 @@ fn gliff_viewer(
     let scale = query(path, "scale")
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(1.0);
+    // With no monitor, a phone's screen can be the only one (Hyprland drops
+    // its FALLBACK screen once another exists): a laptop then shows that.
+    let primary = primary_output().or_else(|_| any_output())?;
     let (w, h) = phone
         .or_else(|| size("view"))
-        .unwrap_or((shared.output.1, shared.output.2));
+        .unwrap_or((primary.1, primary.2));
     // A phone screen: the same scale and size rules as omaspace's own phone
     // screens (at least PHONE_MIN_LOGICAL_WIDTH wide, and a size the scale
     // divides into whole logical pixels, or Hyprland rejects the scale).
@@ -1109,7 +1129,7 @@ fn gliff_viewer(
     };
     let opts = crate::gliff::Options {
         headless: phone.is_some(),
-        mirror: Some(shared.output.0.clone()),
+        mirror: Some(primary.0),
         width: w,
         height: h,
         scale,
@@ -1328,6 +1348,7 @@ fn gliff_viewer(
     if let Some((screen, workspace)) = mine
         && !claimed(workspace)
         && monitor(&screen).and_then(|m| m["activeWorkspace"]["id"].as_i64()) == Some(workspace)
+        && let Ok((primary, _, _)) = primary_output()
     {
         lua_dispatch(&format!(
             "hl.dsp.focus({{ workspace = {} }})",
@@ -1335,7 +1356,7 @@ fn gliff_viewer(
         ));
         lua_dispatch(&format!(
             "hl.dsp.workspace.move({{ monitor = {} }})",
-            hypr::lua_string(&shared.output.0)
+            hypr::lua_string(&primary)
         ));
     }
     session.stop();
@@ -1605,8 +1626,10 @@ fn sweep_orphan_phone_screens(shared: &Shared, seen: &mut std::collections::Hash
         .filter(|(n, _, _)| seen.contains(n))
         .collect();
     *seen = now;
-    if !due.is_empty() {
-        remove_phone_screens(due, &shared.output.0);
+    if !due.is_empty()
+        && let Ok((primary, _, _)) = primary_output()
+    {
+        remove_phone_screens(due, &primary);
     }
 }
 
@@ -1619,23 +1642,29 @@ fn phone_swap(shared: &Shared, id: u64, target: i64) -> Option<String> {
         return Some(name);
     }
     let ws = |n: i64| hypr::lua_string(&n.to_string());
+    // No other screen when the machine has no monitor: Hyprland drops its
+    // FALLBACK screen once the phone's exists, so the old workspace just
+    // stays hidden and the target opens on the phone.
+    let primary = primary_output().ok().map(|(n, _, _)| n);
     // The pin moves with the phone (a gliff phone's workspace is pinned to
     // its screen): lift the old one, pin the new workspace.
     if shared.gliffs.lock().unwrap().contains_key(&id) {
         pin_workspace(&name, Some(target));
     }
-    // Old workspace back to the monitor it belongs on.
-    lua_dispatch(&format!("hl.dsp.focus({{ workspace = {} }})", ws(current)));
-    lua_dispatch(&format!(
-        "hl.dsp.workspace.move({{ monitor = {} }})",
-        hypr::lua_string(&shared.output.0)
-    ));
-    // Target workspace onto the phone screen (it may not exist yet: focusing
-    // creates it on the focused monitor, then it moves).
-    lua_dispatch(&format!(
-        "hl.dsp.focus({{ monitor = {} }})",
-        hypr::lua_string(&shared.output.0)
-    ));
+    if let Some(primary) = &primary {
+        // Old workspace back to the monitor it belongs on.
+        lua_dispatch(&format!("hl.dsp.focus({{ workspace = {} }})", ws(current)));
+        lua_dispatch(&format!(
+            "hl.dsp.workspace.move({{ monitor = {} }})",
+            hypr::lua_string(primary)
+        ));
+        // Target workspace onto the phone screen (it may not exist yet:
+        // focusing creates it on the focused monitor, then it moves).
+        lua_dispatch(&format!(
+            "hl.dsp.focus({{ monitor = {} }})",
+            hypr::lua_string(primary)
+        ));
+    }
     lua_dispatch(&format!("hl.dsp.focus({{ workspace = {} }})", ws(target)));
     lua_dispatch(&format!(
         "hl.dsp.workspace.move({{ monitor = {} }})",
