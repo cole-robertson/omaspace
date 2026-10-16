@@ -146,8 +146,10 @@ test("arrow pad: hold and slide up walks back through shell history; a tap is on
   const view = await phone.open(desk, { workspace: String(WS) });
   await view.pointAt(0.5, 0.2);
   desk.dispatch(`hl.dsp.focus({ window = "address:${term.address}" })`);
-  // History: three commands.
-  for (const n of [1, 2, 3]) await view.type(`echo h${n} > /dev/null\n`);
+  await waitFor(() => desk.json("hyprctl -j activewindow")?.address === term.address, "the terminal has focus");
+  // History: three commands, all run before the pad is used.
+  for (const n of [1, 2, 3]) await view.type(`echo h${n} > h${n}.txt\n`);
+  await waitFor(() => desk.exists(`${dir}/h3.txt`), "the history commands ran");
   const page = view.page, pad = await page.locator("#arrows").boundingBox();
   const cx = pad.x + pad.width / 2, cy = pad.y + pad.height / 2;
   const sent = [];
@@ -155,16 +157,14 @@ test("arrow pad: hold and slide up walks back through shell history; a tap is on
   await page.evaluate(() => { const real = ws.send.bind(ws); ws.send = d => { const m = JSON.parse(d); if (m.type === "combo") window.__sent(m.code); return real(d); }; });
   // Tap the top edge: one Up.
   await page.mouse.move(cx, pad.y + 4); await page.mouse.down(); await page.mouse.up();
-  await page.waitForTimeout(200);
-  expect(sent).toEqual(["ArrowUp"]);
+  await expect.poll(() => sent).toEqual(["ArrowUp"]);
   // Hold and slide up: Up repeats while held.
   sent.length = 0;
   await page.mouse.move(cx, cy); await page.mouse.down();
   await page.mouse.move(cx, cy - 40, { steps: 4 });
-  await page.waitForTimeout(700);
+  // About 6/s at this distance; a busy machine only makes it slower.
+  await expect.poll(() => sent.filter(c => c === "ArrowUp").length, { message: "held slide repeats", timeout: 5000 }).toBeGreaterThanOrEqual(3);
   await page.mouse.up();
-  const ups = sent.filter(c => c === "ArrowUp").length;
-  expect(ups, "held slide repeats").toBeGreaterThanOrEqual(3);
   expect(sent.every(c => c === "ArrowUp")).toBe(true);
   // A fresh prompt (Ctrl+C), then one Up from the pad recalls the newest
   // command (Omarchy binds Up to history-search-backward, so the line must
@@ -174,7 +174,7 @@ test("arrow pad: hold and slide up walks back through shell history; a tap is on
   await page.waitForTimeout(300);
   await page.mouse.move(cx, pad.y + 4); await page.mouse.down(); await page.mouse.up();
   await page.waitForTimeout(200);
-  for (let i = 0; i < "/dev/null".length; i++) await page.evaluate(() => send({ type: "combo", code: "Backspace", mods: 0 }));
+  for (let i = 0; i < "h3.txt".length; i++) await page.evaluate(() => send({ type: "combo", code: "Backspace", mods: 0 }));
   await view.type("got.txt\n");
   await waitFor(() => desk.exists(`${dir}/got.txt`), "a recalled history line ran");
   expect(desk.read(`${dir}/got.txt`)).toBe("h3");
