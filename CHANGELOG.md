@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1 - 2026-10-15
+
+Fixes found testing with gliff 0.4.0.
+
+- **Setup checks the gliff the live view will run:** the first `gliff-server`
+  on the PATH omaspace's services use, not the shell's. It says which one
+  (version and path), and refuses one only the shell can find.
+- **gliff's check leaves no screen behind.** It stopped gliff before gliff
+  removed its private screen, so every setup left one holding a workspace
+  until the sweep caught it, and a phone that connected then could land on
+  the wrong workspace.
+- **The phone page fits the phone.** A full top bar (presence, agents) made
+  the page wider than the phone, so it asked for the wrong size; the
+  workspaces scroll instead.
+- **Phone screen sizes match gliff's rounding** (gliff 0.4 rounds to an even
+  step), so a resize lands on the size the page expects.
+
 ## 0.3.0 - 2026-10-14
 
 **The live view runs only on gliff.** omaspace's own screen recorder is gone
