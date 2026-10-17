@@ -30,6 +30,28 @@ async function touch(page) {
   };
 }
 
+/** Wait until Hyprland has finished tiling `n` windows on WS and the page's
+ *  state shows them where they are: newly opened windows slide into place,
+ *  and a position read mid-slide makes a swap look like it never happened. */
+async function settled(desk, page, n) {
+  // The bar comes to a new screen late on a busy machine and pushes every
+  // window down when it does: wait until the phone's screen has room kept
+  // for it, the same as the real screen.
+  await waitFor(() => {
+    const mons = desk.monitors(), phone = mons.find(m => isPhoneScreen(m)), real = mons.find(m => !isPhoneScreen(m));
+    return phone && real && phone.reserved.join() === real.reserved.join();
+  }, "the bar on the phone's screen", 15_000);
+  let last = "", since = 0;
+  await waitFor(async () => {
+    const now = desk.clients().filter(c => c.workspace.id === WS).map(c => c.address + "@" + c.at.join(",") + "+" + c.size.join(",")).sort().join(" ");
+    if (now !== last || now.split(" ").length < n) { last = now; since = Date.now(); return false; }
+    // Unchanged for a second: newly opened windows slide into place.
+    if (Date.now() - since < 1000) return false;
+    const shown = await page.evaluate(ws => state.windows.filter(w => w.workspace === ws).map(w => w.address + "@" + w.at.join(",") + "+" + w.size.join(",")).sort().join(" "), WS);
+    return shown === now;
+  }, `${n} windows settled on workspace ${WS}`, 15_000);
+}
+
 async function twoTiles(desk, phone) {
   desk.dispatch(`hl.dsp.focus({ workspace = "${WS}" })`);
   const view = await phone.open(desk, { workspace: String(WS) });
@@ -38,7 +60,7 @@ async function twoTiles(desk, phone) {
   const a = await desk.terminal("$HOME", WS);
   const b = await desk.terminal("$HOME", WS);
   await view.page.waitForFunction(n => state.active_workspace === n && state.windows.filter(w => w.workspace === n).length >= 2 && outputOrigin.w > 0, WS, { timeout: 15_000 });
-  await view.page.waitForTimeout(400);
+  await settled(desk, view.page, 2);
   return { a, b, view };
 }
 
@@ -50,8 +72,7 @@ test("long-press a tile and drag it onto another to swap them", async ({ desk, p
   const ca = await centre(page, a.address), cb = await centre(page, b.address);
 
   await t.down(ca);
-  await page.waitForTimeout(600);                                   // hold: lifts the window
-  await expect(page.locator(".tile.lifted")).toBeVisible();
+  await expect(page.locator(".tile.lifted")).toBeVisible();          // hold: lifts the window
   // The outline really is that window: same box as its Hyprland geometry.
   const lift = await page.locator(".tile.lifted").boundingBox();
   expect(Math.abs(lift.x + lift.width / 2 - ca.x)).toBeLessThan(4);
@@ -65,7 +86,7 @@ test("long-press a tile and drag it onto another to swap them", async ({ desk, p
   await page.screenshot({ path: info.outputPath("dragging.png") });
   await t.up();
 
-  await waitFor(() => pos(a.address) === pb && pos(b.address) === pa, "Hyprland swapped the two tiles");
+  await waitFor(() => pos(a.address) === pb && pos(b.address) === pa, () => `Hyprland swapped the two tiles (${JSON.stringify({ before: [pa, pb], now: [pos(a.address), pos(b.address)], mons: desk.monitors().map(m => [m.name, m.reserved]) })})`);
   await expect(page.locator(".tile")).toHaveCount(0);
 });
 
@@ -73,7 +94,7 @@ test("long-press a tile and close it", async ({ desk, phone }, info) => {
   const { a, b, view } = await twoTiles(desk, phone);
   const page = view.page, t = await touch(page);
   await t.down(await centre(page, b.address));
-  await page.waitForTimeout(600);
+  await expect(page.locator(".tile.lifted")).toBeVisible();
   await t.up();
   // Let go without dragging: the action sheet slides up, big buttons.
   await expect(page.locator("#tile-sheet.up")).toBeVisible();
@@ -92,7 +113,7 @@ test("a tap elsewhere puts a lifted tile back without doing anything", async ({ 
   const before = desk.clients().filter(c => c.workspace.id === WS).map(c => c.address + c.at).sort();
   const page = view.page, t = await touch(page);
   await t.down(await centre(page, a.address));
-  await page.waitForTimeout(600);
+  await expect(page.locator(".tile.lifted")).toBeVisible();
   await t.up();
   await expect(page.locator("#tile-sheet.up")).toBeVisible();
   await t.down(await centre(page, b.address)); await t.up();
@@ -116,7 +137,7 @@ test("long-press, let go, and move the window to another workspace from the shee
   const { a, view } = await twoTiles(desk, phone);
   const page = view.page, t = await touch(page);
   await t.down(await centre(page, a.address));
-  await page.waitForTimeout(600);
+  await expect(page.locator(".tile.lifted")).toBeVisible();
   await t.up();
   await expect(page.locator("#tile-sheet.up")).toBeVisible();
   await page.tap('#tile-ws button[data-ws="9"]');
@@ -134,7 +155,7 @@ test("a fullscreen window covers the others: nothing behind it can be lifted or 
   const old = await page.evaluate(x => { const w = state.windows.find(w => w.address === x), r = tileRect(w), s = document.getElementById("stage").getBoundingClientRect(); return { x: s.left + r.x + r.w / 2, y: s.top + r.y + r.h / 2 }; }, b.address);
   expect(await page.evaluate(([x, y]) => windowAt(x, y)?.address, [old.x, old.y]), "the window under the finger is the fullscreen one").toBe(a.address);
   await t.down(old);
-  await page.waitForTimeout(600);
+  await expect(page.locator(".tile.lifted")).toBeVisible();
   await t.up();
   await expect(page.locator("#tile-sheet.up")).toBeVisible();
   await expect(page.locator("#tile-title")).toContainText(a.class);
@@ -150,8 +171,11 @@ test("swapping three tiles in a row swaps exactly the ones you drag", async ({ d
   const wins = [];
   for (let i = 0; i < 3; i++) wins.push(await desk.terminal("$HOME", WS));
   await view.page.waitForFunction(n => state.windows.filter(w => w.workspace === n).length >= 3, WS, { timeout: 15_000 });
-  await view.page.waitForTimeout(400);
+  await settled(desk, view.page, 3);
   const page = view.page, t = await touch(page);
+  const swaps = [];
+  await page.exposeFunction("__swap", m => swaps.push(m));
+  await page.evaluate(() => { const real = ws.send.bind(ws); ws.send = d => { const m = JSON.parse(d); if (m.type === "swap_windows") window.__swap(m); return real(d); }; });
   const slot = () => Object.fromEntries(desk.clients().filter(c => c.workspace.id === WS).map(c => [c.address, c.at.join(",")]));
   // Drag one window onto another, straight away again, and once more,
   // without waiting for the layout to settle between swaps.
@@ -159,10 +183,12 @@ test("swapping three tiles in a row swaps exactly the ones you drag", async ({ d
     const before = slot();
     const a = wins[from].address, b = wins[to].address;
     const ca = await centre(page, a), cb = await centre(page, b);
-    await t.down(ca); await page.waitForTimeout(500);
+    await t.down(ca); await expect(page.locator(".tile.lifted")).toBeVisible();
     for (let i = 1; i <= 6; i++) await t.move({ x: ca.x + (cb.x - ca.x) * i / 6, y: ca.y + (cb.y - ca.y) * i / 6 });
     await t.up();
-    await waitFor(() => { const s = slot(); return s[a] === before[b] && s[b] === before[a]; }, `swapped ${from}<->${to} and only those`);
+    await expect.poll(() => swaps.length, { message: `the page sent swap ${from}<->${to}` }).toBe([[0, 1], [1, 2], [2, 0]].findIndex(([f]) => f === from) + 1);
+    expect(swaps.at(-1)).toMatchObject({ address: a, with: b });
+    await waitFor(() => { const s = slot(); return s[a] === before[b] && s[b] === before[a]; }, `Hyprland swapped ${from}<->${to} and only those (${JSON.stringify({ before, now: slot() })})`);
     const after = slot();
     for (const w of wins) if (w.address !== a && w.address !== b) expect(after[w.address], "a third window didn't move").toBe(before[w.address]);
   }

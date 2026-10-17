@@ -124,7 +124,8 @@ test("hand a browser window to the agent, then take it back", async ({ desk, pho
   await waitFor(() => !desk.clients().some(c => c.address === mine.address), "user's window closed");
   const tabs = await waitFor(() => { try { const t = desk.mcp("browser_tabs", { agent: AGENT }); return t.length >= 2 && t; } catch { return false; } }, "agent has the tabs", 30_000);
   expect(tabs.map(t => t.url)).toEqual(expect.arrayContaining(["https://example.org/", "https://www.iana.org/help/example-domains"]));
-  expect(desk.clients().some(c => c.class === "omaspace-agent" && c.workspace.id === space.workspace)).toBe(true);
+  // Its window can map a moment after the tabs answer.
+  await waitFor(() => desk.clients().some(c => c.class === "omaspace-agent" && c.workspace.id === space.workspace), "the agent's browser window on its workspace");
 
   // While it has the browser the agent "signs in" somewhere: a cookie that
   // must come back to the user's own profile with the browser.

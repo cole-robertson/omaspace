@@ -205,6 +205,7 @@ export async function waitFor(fn, what, timeout = 10000, every = 250) {
     try { const v = await fn(); if (v) return v; } catch (e) { last = e; }
     await new Promise(r => setTimeout(r, every));
   }
+  if (typeof what === "function") what = what();
   throw new Error(`timed out waiting for ${what}${last ? ` (last error: ${last.message})` : ""}`);
 }
 
