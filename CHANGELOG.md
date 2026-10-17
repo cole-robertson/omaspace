@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 - 2026-10-16
 
 - **The live view works on a machine with no monitor.** It mirrored the
   screen it found at startup, so unplugging the monitor (or a machine that
@@ -12,6 +12,10 @@
 - **Tests for a machine with no monitor and for a hub:** giving to and taking
   from a headless machine, watching it from a phone and a laptop, and
   stashing to and restoring from a hub.
+- **Steadier end-to-end tests on a busy machine.** The tile tests wait for
+  the phone's screen to get its bar and for windows to stop moving before
+  dragging, and hold until a tile lifts instead of a fixed time; the arrow
+  pad and agent hand-over tests wait for what they check.
 
 ## 0.3.1 - 2026-10-15
 
