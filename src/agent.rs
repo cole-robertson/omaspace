@@ -260,6 +260,10 @@ pub fn open_browser(
             &data,
             &crate::cookies::Keys::basic(),
         )?;
+        // Your Chromium is running, so its Preferences say it hasn't exited
+        // cleanly: copied as they are, the agent's browser would open with
+        // "Restore pages?" over its first page.
+        profile::mark_clean_exit(&data_dir.join("Default"))?;
     }
     // DevTools over a pipe the broker holds, relayed on a 0600 socket: with a
     // --remote-debugging-port any local user could read this profile's
