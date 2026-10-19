@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **An agent's browser opens without "Restore pages?".** It starts from a copy
+  of your sign-ins, taken while your Chromium is running, so the copy said
+  Chromium hadn't closed cleanly and the agent's first page opened under
+  Chromium's restore prompt.
+- **The README shows each feature in motion:** giving a workspace, the phone
+  view, an agent asking for help, swapping windows; more in
+  [docs/demos.md](docs/demos.md).
+
 ## 0.3.2 - 2026-10-16
 
 - **The live view works on a machine with no monitor.** It mirrored the

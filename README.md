@@ -28,13 +28,18 @@ and give AI agents a workspace of their own next to yours.
   folders the same on two machines, both ways, in the background. Everything
   goes straight between your machines, never through a cloud.
 
-![The live view in a laptop's browser](docs/screenshots/laptop.webp)
+![Another machine gives its workspace to this one: a terminal in the same folder and the browser reopen here](docs/demos/give.gif)
 
 <p align="center">
-  <img src="docs/screenshots/phone-help.webp" alt="On a phone: an agent asks which time works, with Take over and Later" width="300">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/phone-control.webp" alt="After Take over: you're in control and the agent is paused, with Hand back" width="300">
+  <img src="docs/demos/phone.gif" alt="On a phone: switch to the browser's workspace and back, then type in a terminal" width="240">
+  &nbsp;
+  <img src="docs/demos/agent-help.gif" alt="On a phone: an agent asks which time works; Take over pauses it, Hand back lets it carry on" width="240">
+  &nbsp;
+  <img src="docs/demos/tiles.gif" alt="On a phone: long-press a window and drag it onto another to swap them" width="240">
 </p>
+
+More in [docs/demos.md](docs/demos.md): the whole desktop in a laptop's
+browser, and files from your phone.
 
 It works only between your own devices: every request is identified with
 Tailscale and refused unless it comes from your own account. Nothing goes
