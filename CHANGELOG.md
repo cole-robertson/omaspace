@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 - 2026-10-19
 
 - **An agent's browser opens without "Restore pages?".** It starts from a copy
   of your sign-ins, taken while your Chromium is running, so the copy said
