@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4 - 2026-10-21
+
+- **Setup on a machine that isn't signed in to Tailscale says so.** It
+  carried on, printed a JSON error ("invalid type: null, expected a
+  sequence") and left the services restarting with the same error. Setup
+  now stops before installing anything, and every command says: *Tailscale
+  isn't connected; sign in with: sudo tailscale up*.
+
 ## 0.3.3 - 2026-10-19
 
 - **An agent's browser opens without "Restore pages?".** It starts from a copy
