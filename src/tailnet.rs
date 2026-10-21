@@ -56,6 +56,29 @@ struct Status {
     users: Option<std::collections::HashMap<String, Profile>>,
     #[serde(rename = "MagicDNSSuffix", default)]
     magic_dns_suffix: String,
+    #[serde(rename = "BackendState", default)]
+    backend_state: String,
+}
+
+/// tailscaled's status, once it's signed in: before that, there's no
+/// tailnet to identify anyone with.
+fn status() -> anyhow::Result<Status> {
+    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    anyhow::ensure!(
+        matches!(s.backend_state.as_str(), "Running" | "Starting" | ""),
+        "Tailscale isn't connected ({}); sign in with: sudo tailscale up",
+        s.backend_state
+    );
+    Ok(s)
+}
+
+/// `null` where tailscaled has nothing to list.
+fn null_as_empty<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Deserialize, Clone)]
@@ -68,7 +91,7 @@ pub struct Peer {
     pub user_id: i64,
     #[serde(rename = "Tags", default)]
     pub tags: Option<Vec<String>>,
-    #[serde(rename = "TailscaleIPs", default)]
+    #[serde(rename = "TailscaleIPs", default, deserialize_with = "null_as_empty")]
     pub ips: Vec<String>,
     #[serde(rename = "Online", default)]
     pub online: bool,
@@ -120,7 +143,7 @@ pub fn whois(addr: &str) -> anyhow::Result<Identity> {
 }
 
 pub fn me() -> anyhow::Result<Identity> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     Ok(Identity {
         node_id: s.me.id.clone(),
         name: s.me.host,
@@ -132,7 +155,7 @@ pub fn me() -> anyhow::Result<Identity> {
 
 /// The tailnet's DNS name, e.g. `tail1234.ts.net`.
 pub fn magic_dns_suffix() -> anyhow::Result<String> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     anyhow::ensure!(
         !s.magic_dns_suffix.is_empty(),
         "MagicDNS is off on this tailnet"
@@ -142,13 +165,13 @@ pub fn magic_dns_suffix() -> anyhow::Result<String> {
 
 /// This machine's MagicDNS name, e.g. `alpha.tail1234.ts.net.`.
 pub fn my_dns_name() -> anyhow::Result<String> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     anyhow::ensure!(!s.me.dns_name.is_empty(), "MagicDNS is off on this tailnet");
     Ok(s.me.dns_name)
 }
 
 pub fn my_ipv4() -> anyhow::Result<String> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     s.me.ips
         .into_iter()
         .find(|ip| ip.contains('.'))
@@ -156,7 +179,7 @@ pub fn my_ipv4() -> anyhow::Result<String> {
 }
 
 pub fn peers() -> anyhow::Result<Vec<Peer>> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     let users = s.users.unwrap_or_default();
     Ok(s.peers
         .unwrap_or_default()
@@ -216,7 +239,7 @@ pub fn owners_path() -> Option<std::path::PathBuf> {
 
 /// The people (real logins, not tagged devices) on this tailnet.
 pub fn people() -> anyhow::Result<Vec<String>> {
-    let s: Status = serde_json::from_str(&local_api("status")?)?;
+    let s = status()?;
     let mut out: Vec<String> = s
         .users
         .unwrap_or_default()

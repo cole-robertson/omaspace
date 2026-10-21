@@ -227,6 +227,8 @@ fn path_str(p: &Path) -> anyhow::Result<&str> {
 }
 
 pub fn run(home: &Path) -> anyhow::Result<()> {
+    // Everything below needs this machine on your tailnet.
+    crate::tailnet::me()?;
     install_gliff()?;
     if let Err(e) = owners_for_tagged_machine() {
         println!("couldn't check this machine's Tailscale owners: {e}");
