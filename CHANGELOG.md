@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 - 2026-10-22
+
+- **An agent can work in more than one space.** Each agent's connection was
+  locked to the first name it used, so an agent already holding a workspace
+  couldn't open a second one for a second task. It now claims another space
+  under a new name (`claim_space` with, say, "Claude 2") and works there
+  under that name. It still can't act as a name it didn't claim, and
+  claiming another agent's name is refused.
+
 ## 0.3.4 - 2026-10-21
 
 - **Setup on a machine that isn't signed in to Tailscale says so.** It
