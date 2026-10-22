@@ -38,7 +38,7 @@ fn tools() -> Value {
         {"name": "synced_folders", "description": "Folders on this machine kept in sync with your other machines, and how each is doing.",
          "inputSchema": {"type": "object", "properties": {}}},
 
-        {"name": "claim_space", "description": "Get your own Omarchy workspace on this machine to work in, next to the user (they can swipe to it and watch). Call first; keeps the same workspace for your agent name.",
+        {"name": "claim_space", "description": "Get your own Omarchy workspace on this machine to work in, next to the user (they can swipe to it and watch). Call first; keeps the same workspace for your agent name. Need a second workspace? Claim again under a new agent name (e.g. Claude 2), then pass that name to act there.",
          "inputSchema": {"type": "object", "required": ["agent"], "properties": {"agent": agent_name.clone(), "task": {"type": "string", "description": "one line: what you're doing"}}}},
         {"name": "set_status", "description": "Tell the user what you're doing now (shows on your workspace in their view).",
          "inputSchema": {"type": "object", "required": ["agent", "status"], "properties": {"agent": agent_name.clone(), "status": {"type": "string"}}}},
@@ -188,22 +188,37 @@ fn acts_on_desktop(tool: &str) -> bool {
     )
 }
 
-/// One MCP server process serves one agent: the first agent name it's used
-/// with is its name for good, so one agent can't drive another's browser,
-/// terminals or windows by passing a different name.
-static BOUND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// One MCP server process serves the agents it named itself: the first name
+/// it's used with is its own for good, and it may claim more spaces under NEW
+/// names (a second workspace for a second task). It can never act as a name
+/// it didn't claim, so one agent can't drive another's browser, terminals or
+/// windows by passing that agent's name.
+static BOUND: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-fn bind_agent(who: &str) -> anyhow::Result<String> {
-    bind_agent_in(&BOUND, who)
+enum Binding {
+    Bound(String),
+    /// A name this connection doesn't hold yet: only claiming a brand-new
+    /// space under it may bind it.
+    New(String),
 }
 
-fn bind_agent_in(bound: &std::sync::OnceLock<String>, who: &str) -> anyhow::Result<String> {
-    let name = bound.get_or_init(|| who.to_string());
-    anyhow::ensure!(
-        name == who,
-        "this connection is agent {name:?}; it can't act as {who:?} (start another MCP server for another agent)"
-    );
-    Ok(name.clone())
+fn bind_agent_in(bound: &std::sync::Mutex<Vec<String>>, who: &str) -> Binding {
+    let mut names = bound.lock().unwrap_or_else(|e| e.into_inner());
+    if names.is_empty() {
+        names.push(who.to_string());
+    }
+    if names.iter().any(|n| n == who) {
+        Binding::Bound(who.to_string())
+    } else {
+        Binding::New(who.to_string())
+    }
+}
+
+fn refuse_unbound(bound: &std::sync::Mutex<Vec<String>>, who: &str) -> anyhow::Error {
+    let names = bound.lock().unwrap_or_else(|e| e.into_inner()).join(", ");
+    anyhow::anyhow!(
+        "this connection is agent {names}; it can't act as {who:?}. To work in another space, claim_space with a new agent name"
+    )
 }
 
 fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Result<Value> {
@@ -213,7 +228,17 @@ fn agent_call(home: &std::path::Path, name: &str, args: &Value) -> anyhow::Resul
     let who = args["agent"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("agent is required"))?;
-    let who = bind_agent(who)?;
+    let who = match bind_agent_in(&BOUND, who) {
+        Binding::Bound(who) => who,
+        Binding::New(who) if name == "claim_space" => {
+            // claim_new refuses a name that already has a space (another
+            // connection's), under the store lock, so two can't share one.
+            let space = agent::claim_new(home, &who, args["task"].as_str().unwrap_or(""))?;
+            BOUND.lock().unwrap_or_else(|e| e.into_inner()).push(who);
+            return Ok(json!(space));
+        }
+        Binding::New(who) => return Err(refuse_unbound(&BOUND, &who)),
+    };
     let who = who.as_str();
     let text = |k: &str| {
         args[k]
@@ -419,10 +444,26 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_connection_is_one_agent() {
-        let bound = std::sync::OnceLock::new();
-        assert_eq!(super::bind_agent_in(&bound, "A").unwrap(), "A");
-        assert_eq!(super::bind_agent_in(&bound, "A").unwrap(), "A");
-        assert!(super::bind_agent_in(&bound, "B").is_err());
+    fn a_connection_acts_only_as_names_it_holds() {
+        let bound = std::sync::Mutex::new(Vec::new());
+        assert!(matches!(super::bind_agent_in(&bound, "A"), super::Binding::Bound(n) if n == "A"));
+        assert!(matches!(
+            super::bind_agent_in(&bound, "A"),
+            super::Binding::Bound(_)
+        ));
+        assert!(
+            matches!(super::bind_agent_in(&bound, "B"), super::Binding::New(_)),
+            "another name is not bound until a new space is claimed under it"
+        );
+        bound.lock().unwrap().push("B".into());
+        assert!(matches!(
+            super::bind_agent_in(&bound, "B"),
+            super::Binding::Bound(_)
+        ));
+        assert!(
+            super::refuse_unbound(&bound, "C")
+                .to_string()
+                .contains("A, B")
+        );
     }
 }

@@ -153,26 +153,60 @@ pub fn claim(home: &Path, agent: &str, task: &str) -> anyhow::Result<Space> {
             }
             return Ok(s.clone());
         }
-        let busy = |ws: i64| {
-            ws == active
-                || store.spaces.iter().any(|s| s.workspace == ws)
-                || clients.iter().any(|c| c.workspace.id == ws)
-        };
-        let ws = SPACE_RANGE
-            .rev()
-            .find(|ws| !busy(*ws))
-            .ok_or_else(|| anyhow::anyhow!("no free workspace in 5–9 for an agent"))?;
-        let space = Space {
-            workspace: ws,
-            agent: agent.into(),
-            task: task.into(),
-            status: "starting".into(),
-            help: None,
-            browsers: vec![],
-            claimed_at: now(),
-        };
-        store.spaces.push(space.clone());
-        Ok(space)
+        place(store, agent, task, active, &clients)
+    })
+}
+
+/// A new space on the highest free workspace in 5–9.
+fn place(
+    store: &mut Store,
+    agent: &str,
+    task: &str,
+    active: i64,
+    clients: &[hypr::Client],
+) -> anyhow::Result<Space> {
+    anyhow::ensure!(
+        !agent.trim().is_empty() && agent.len() <= 40,
+        "an agent name (up to 40 characters) is required"
+    );
+    let busy = |ws: i64| {
+        ws == active
+            || store.spaces.iter().any(|s| s.workspace == ws)
+            || clients.iter().any(|c| c.workspace.id == ws)
+    };
+    let ws = SPACE_RANGE
+        .rev()
+        .find(|ws| !busy(*ws))
+        .ok_or_else(|| anyhow::anyhow!("no free workspace in 5–9 for an agent"))?;
+    let space = Space {
+        workspace: ws,
+        agent: agent.into(),
+        task: task.into(),
+        status: "starting".into(),
+        help: None,
+        browsers: vec![],
+        claimed_at: now(),
+    };
+    store.spaces.push(space.clone());
+    Ok(space)
+}
+
+/// Claim a space under a name that has none yet: a connection adding a
+/// second space. Refused when the name is already someone's (checked under
+/// the store lock), so this can never hand over another agent's space.
+pub fn claim_new(home: &Path, agent: &str, task: &str) -> anyhow::Result<Space> {
+    anyhow::ensure!(
+        !list(home).iter().any(|s| s.agent == agent),
+        "{agent:?} is another agent's space; pick a new name"
+    );
+    let clients = hypr::clients()?;
+    let active = hypr::active_workspace().unwrap_or(1);
+    with_store(home, |store| {
+        anyhow::ensure!(
+            !store.spaces.iter().any(|s| s.agent == agent),
+            "{agent:?} is another agent's space; pick a new name"
+        );
+        place(store, agent, task, active, &clients)
     })
 }
 
@@ -546,6 +580,27 @@ mod tests {
         );
         release(home.path(), "a").unwrap();
         assert!(list(home.path()).is_empty());
+    }
+
+    #[test]
+    fn a_second_space_never_takes_another_agents_name() {
+        let home = tempfile::tempdir().unwrap();
+        with_store(home.path(), |s| {
+            s.spaces.push(Space {
+                workspace: 9,
+                agent: "Other".into(),
+                task: "t".into(),
+                status: "".into(),
+                help: None,
+                browsers: vec![],
+                claimed_at: 1,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let err = claim_new(home.path(), "Other", "steal it").unwrap_err();
+        assert!(err.to_string().contains("another agent's space"));
+        assert_eq!(space_of(home.path(), "Other").unwrap().task, "t");
     }
 }
 
